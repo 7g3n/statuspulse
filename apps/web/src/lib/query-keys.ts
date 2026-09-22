@@ -8,4 +8,6 @@ export const queryKeys = {
   dashboard: ['dashboard'] as const,
   monitor: (id: string) => ['monitor', id] as const,
   monitorChecks: (id: string) => ['monitor', id, 'checks'] as const,
+  /** 監視対象を絞らない一覧は 'all'。キーの形を揃えて無効化を1か所で書けるようにする。 */
+  incidents: (monitorId: string | undefined) => ['incidents', monitorId ?? 'all'] as const,
 } as const;

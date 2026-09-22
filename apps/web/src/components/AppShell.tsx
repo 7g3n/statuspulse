@@ -1,18 +1,22 @@
 import type { ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 
 import { useSession } from '@/features/auth/session';
 import { isMockMode } from '@/lib/env';
 
-import { Button } from './ui';
+import { Button, cn } from './ui';
 
 /**
  * 画面の外枠。
  *
- * Phase 1 の画面はダッシュボードと監視対象の詳細だけなので、サイドバーは置かない。
- * 項目が2つしかないナビゲーションは、場所を取るだけで案内にならない。
- * 画面が増える Phase 2 以降で必要になったら足す。
+ * Phase 2 で履歴の画面が増えたので、横並びのナビゲーションを足した。
+ * サイドバーは置かない。項目が2つのために画面幅を常時削る理由がない。
  */
+
+const NAV_ITEMS = [
+  { to: '/', label: 'ダッシュボード', end: true },
+  { to: '/incidents', label: 'ダウンタイム履歴', end: false },
+] as const;
 export function AppShell({ children }: { children: ReactNode }) {
   const { user, signOut } = useSession();
 
@@ -33,6 +37,26 @@ export function AppShell({ children }: { children: ReactNode }) {
             </span>
             <span className="text-sm font-semibold tracking-tight text-slate-900">StatusPulse</span>
           </Link>
+
+          <nav className="ml-6 mr-auto flex items-center gap-1">
+            {NAV_ITEMS.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  cn(
+                    'rounded-md px-2.5 py-1.5 text-sm transition',
+                    isActive
+                      ? 'bg-slate-100 font-medium text-slate-900'
+                      : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900',
+                  )
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
 
           <div className="flex items-center gap-3">
             {user && <span className="hidden text-xs text-slate-500 sm:inline">{user.email}</span>}

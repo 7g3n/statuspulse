@@ -32,3 +32,10 @@ CHECK_CONCURRENCY = "5"
 
 # 観測ログの保持日数。これを超えた行は1日1回まとめて削除する。
 CHECK_RETENTION_DAYS = "30"
+
+# 通知に載せるダッシュボードの URL。未設定ならリンクを出さない。
+# APP_URL = "https://statuspulse.example.com"
+
+# SLACK_WEBHOOK_URL は secret として登録する（URL 自体が送信権限そのものなので）。
+#   pnpm --filter @statuspulse/cron exec wrangler secret put SLACK_WEBHOOK_URL
+# 未設定でも動く。その場合は送信せず、本文をログに出して 'skipped' として記録する。

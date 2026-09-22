@@ -1,24 +1,80 @@
 /**
  * 稼働率の計算と表示。
  *
- * 稼働率の定義（Phase 1）:
+ * 定義は2つあり、役割が違う。
  *
- *   稼働率 = 成功したチェック回数 ÷ 実行したチェック回数
+ *   時間ベース（Phase 2 以降の主）  = 1 − 停止していた時間 ÷ 対象期間
+ *   チェック回数ベース（Phase 1）    = 成功したチェック回数 ÷ 実行したチェック回数
  *
- * これは「時間ベース」ではなく「チェック回数ベース」の定義になる。
- * 監視対象ごとに間隔が一定なので、Phase 1 の範囲では両者はほぼ一致する。
+ * Phase 1 は incidents（ダウンの期間）を持っていなかったので回数ベースしか出せなかった。
+ * 期間を持った今は時間ベースが主で、回数は「その数字がどれだけの観測に支えられているか」
+ * を示す補助として残してある。
  *
- * ただし1点、構造的な弱さがある。**分母は「実行できたチェック」しか数えない**ので、
- * Worker 自体が止まっていた時間は分母からも分子からも消える。
- * その間に監視対象が落ちていても稼働率には表れず、実態より良い数字が出る。
+ * どちらの定義でも残る弱点が1つある。**どちらも「監視できていた時間」の話でしかない。**
+ * Worker 自体が止まっていれば、その間の障害はそもそも観測されず、
+ * incidents にも checks にも現れない。稼働率は実態より良く出る。
  *
  * 黙って良い数字を出すのは監視ツールとして最も避けたい挙動なので、
  * 期待されるチェック回数と実際の回数を突き合わせる checkCoverage() を用意し、
- * 取りこぼしがあることを画面に出す。
- *
- * 時間ベースの稼働率（ダウンしていた「期間」の合計 ÷ 対象期間）は
- * ダウンタイム履歴を持つ Phase 2 で導入する。詳細は docs/decisions.md。
+ * 取りこぼしがあることを画面に出す。詳細は docs/decisions.md。
  */
+
+/* -------------------------------------------------------------------------- */
+/* 時間ベースの稼働率（Phase 2）                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 停止していた時間から稼働率を出す。
+ *
+ * Phase 2 でダウンタイムの期間（incidents）を持ったので、こちらが主になった。
+ * 「99.5%」が意味するのが「チェックの 0.5% が失敗した」ではなく
+ * 「期間の 0.5% だけ止まっていた」になり、他のサービスが出す稼働率と比較できる。
+ *
+ * windowSeconds は observedWindowSeconds() で監視対象の年齢に切り詰めてから渡す。
+ * 登録して1時間の対象を24時間で割ると、稼働率が常に 95% 台に見える。
+ */
+export function timeBasedUptime(downSeconds: number, windowSeconds: number): number | null {
+  if (windowSeconds <= 0) return null;
+  // 継続中の障害や時刻のずれで、停止時間が期間を超えることがある。負の稼働率は出さない。
+  const clamped = Math.min(Math.max(downSeconds, 0), windowSeconds);
+  return 1 - clamped / windowSeconds;
+}
+
+/**
+ * 集計期間を、その監視対象が存在していた時間まで切り詰める。
+ *
+ * 「24時間の稼働率」は、24時間ぶん監視していて初めて言える。
+ * 足りないぶんを稼働扱いにしても停止扱いにしても、どちらも実態ではない。
+ */
+export function observedWindowSeconds(
+  createdAt: string,
+  windowSeconds: number,
+  now: number = Date.now(),
+): number {
+  const ageSeconds = (now - Date.parse(createdAt)) / 1000;
+  return Math.max(0, Math.min(windowSeconds, ageSeconds));
+}
+
+/** 停止時間の表示。0 は「なし」と書く（「0分」は計測できていないようにも読める）。 */
+export function formatDowntime(seconds: number): string {
+  if (seconds <= 0) return 'なし';
+  if (seconds < 60) return `${Math.round(seconds)}秒`;
+
+  const totalMinutes = Math.floor(seconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}分`;
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours < 24) return minutes === 0 ? `${hours}時間` : `${hours}時間${minutes}分`;
+
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours === 0 ? `${days}日` : `${days}日${restHours}時間`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* チェック回数ベースの稼働率                                                  */
+/* -------------------------------------------------------------------------- */
 
 /** ある期間のチェック結果の集計。DB のビューが返す形。 */
 export type UptimeCounts = {

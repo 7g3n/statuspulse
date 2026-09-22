@@ -65,9 +65,13 @@ insert into auth.identities (
 --   - 今まさに落ちているもの
 --   - 一時的に無効化してあるもの
 -- -----------------------------------------------------------------------------
+-- 1つ目だけ failure_threshold を 3 にしてある。
+-- 5日前の32分の障害はインシデントとして記録されるが、2日前の10分の瞬断
+-- （5分間隔なので2回）は閾値に届かず記録されない。
+-- 「誤検知を減らす」設定が実際に何を落とすのかを、画面で見比べられるようにするため。
 insert into monitors (
   id, owner_id, name, url, method, expected_status_code,
-  interval_seconds, timeout_ms, is_enabled, created_at
+  interval_seconds, timeout_ms, failure_threshold, is_enabled, created_at
 ) values
   -- ★ 自分のデプロイ先に差し替える行 ★
   (
@@ -75,35 +79,35 @@ insert into monitors (
     '00000000-0000-0000-0000-0000000000a1',
     'StockDesk（本番）',
     'https://stockdesk.example.com/',
-    'GET', null, 300, 10000, true, now() - interval '30 days'
+    'GET', null, 300, 10000, 3, true, now() - interval '30 days'
   ),
   (
     '00000000-0000-0000-0000-0000000000b2',
     '00000000-0000-0000-0000-0000000000a1',
     'StockDesk API（ヘルスチェック）',
     'https://stockdesk.example.com/api/health',
-    'GET', 200, 300, 5000, true, now() - interval '30 days'
+    'GET', 200, 300, 5000, 2, true, now() - interval '30 days'
   ),
   (
     '00000000-0000-0000-0000-0000000000b3',
     '00000000-0000-0000-0000-0000000000a1',
     'ポートフォリオサイト',
     'https://portfolio.example.com/',
-    'HEAD', null, 900, 10000, true, now() - interval '30 days'
+    'HEAD', null, 900, 10000, 2, true, now() - interval '30 days'
   ),
   (
     '00000000-0000-0000-0000-0000000000b4',
     '00000000-0000-0000-0000-0000000000a1',
     '画像配信 CDN',
     'https://cdn.example.com/health.txt',
-    'GET', 200, 300, 3000, true, now() - interval '30 days'
+    'GET', 200, 300, 3000, 2, true, now() - interval '30 days'
   ),
   (
     '00000000-0000-0000-0000-0000000000b5',
     '00000000-0000-0000-0000-0000000000a1',
     '検証環境（stg）',
     'https://stg.stockdesk.example.com/',
-    'GET', null, 1800, 10000, false, now() - interval '30 days'
+    'GET', null, 1800, 10000, 2, false, now() - interval '30 days'
   );
 
 -- -----------------------------------------------------------------------------
@@ -237,10 +241,112 @@ status_changed as (
 )
 update monitors m set
   last_checked_at = l.checked_at,
-  current_status = (case when l.result = 'up' then 'up' else 'down' end)::monitor_status,
+  -- 閾値に届いていない失敗は down にしない（record_check() と同じ規則）。
+  -- シードの対象はいずれも履歴の中で一度は成功しているので、down でなければ up になる。
+  current_status = (
+    case when l.result = 'down' and tf.failures >= m.failure_threshold then 'down' else 'up' end
+  )::monitor_status,
   consecutive_failures = case when l.result = 'up' then 0 else tf.failures end,
+  first_failure_at = case when l.result = 'up' then null else ff.at end,
   status_changed_at = sc.changed_at
 from latest l
 join trailing_failures tf on tf.monitor_id = l.monitor_id
 join status_changed sc on sc.monitor_id = l.monitor_id
+left join lateral (
+  -- 末尾に続いている失敗の、最初の1回の時刻
+  select min(c.checked_at) as at
+  from checks c
+  where c.monitor_id = l.monitor_id
+    and c.result = 'down'
+    and c.checked_at > coalesce(
+      (select max(c2.checked_at) from checks c2
+        where c2.monitor_id = l.monitor_id and c2.result = 'up'),
+      '-infinity'::timestamptz
+    )
+) ff on true
 where m.id = l.monitor_id;
+
+-- -----------------------------------------------------------------------------
+-- 生成した履歴からインシデントを復元する
+--
+-- 本来 incidents は record_check() が開閉する。シードは checks を直接作っているので、
+-- 同じ規則（連続した失敗のまとまり / 閾値に届いたものだけ / 開始は最初の失敗）を
+-- ここで再現する。
+--
+-- 連続したまとまりの取り出しは、並び順の差が一定になることを使う（gaps and islands）。
+-- 全体の連番と、結果ごとの連番の差は、同じ結果が続いている間だけ一定になる。
+-- -----------------------------------------------------------------------------
+with ordered as (
+  select
+    c.monitor_id, c.checked_at, c.result, c.error_kind, c.status_code, c.error_message,
+    row_number() over (partition by c.monitor_id order by c.checked_at)
+      - row_number() over (partition by c.monitor_id, c.result order by c.checked_at) as run_id
+  from checks c
+),
+down_runs as (
+  select
+    o.monitor_id,
+    min(o.checked_at) as started_at,
+    max(o.checked_at) as last_failure_at,
+    count(*)::integer as failure_count,
+    (array_agg(o.error_kind order by o.checked_at))[1] as cause,
+    (array_agg(o.status_code order by o.checked_at))[1] as status_code,
+    (array_agg(o.error_message order by o.checked_at))[1] as error_message
+  from ordered o
+  where o.result = 'down'
+  group by o.monitor_id, o.run_id
+)
+insert into incidents (
+  monitor_id, started_at, ended_at, cause, status_code, error_message, failure_count
+)
+select
+  r.monitor_id,
+  -- 開始は「最初に失敗した時刻」。閾値ぶんの遅れを稼働率に持ち込まない。
+  r.started_at,
+  -- 復旧は「成功を確認した時刻」。次の成功が無ければ継続中（NULL）。
+  (
+    select min(c.checked_at) from checks c
+    where c.monitor_id = r.monitor_id
+      and c.result = 'up'
+      and c.checked_at > r.last_failure_at
+  ),
+  r.cause,
+  r.status_code,
+  r.error_message,
+  r.failure_count
+from down_runs r
+join monitors m on m.id = r.monitor_id
+where r.failure_count >= m.failure_threshold;
+
+-- -----------------------------------------------------------------------------
+-- 通知の記録
+--
+-- 実際には Worker が claim_notification() で作る。画面に「通知済み / 未送信」の
+-- 見え方を出すため、シードでは送信済みとして入れておく。
+-- -----------------------------------------------------------------------------
+insert into notifications (kind, dedupe_key, monitor_id, incident_id, payload, status, claimed_at, settled_at)
+select
+  'monitor_down',
+  'monitor_down:' || i.id,
+  i.monitor_id,
+  i.id,
+  jsonb_build_object('monitor_name', m.name, 'url', m.url, 'event', 'went_down'),
+  'sent',
+  i.started_at,
+  i.started_at
+from incidents i
+join monitors m on m.id = i.monitor_id;
+
+insert into notifications (kind, dedupe_key, monitor_id, incident_id, payload, status, claimed_at, settled_at)
+select
+  'monitor_recovered',
+  'monitor_recovered:' || i.id,
+  i.monitor_id,
+  i.id,
+  jsonb_build_object('monitor_name', m.name, 'url', m.url, 'event', 'recovered'),
+  'sent',
+  i.ended_at,
+  i.ended_at
+from incidents i
+join monitors m on m.id = i.monitor_id
+where i.ended_at is not null;

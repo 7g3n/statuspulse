@@ -55,10 +55,27 @@ export const monitorFormSchema = z.object({
     .max(599, 'ステータスコードは100〜599で指定してください')
     .nullable(),
 
+  // 何回連続で失敗したら「異常」と判定するか（Phase 2）。
+  // 上限を 10 に抑えているのは、それ以上にすると検知の遅れが実用の範囲を超えるため。
+  failureThreshold: z
+    .number({ invalid_type_error: '連続失敗回数を選択してください' })
+    .int()
+    .min(1, '連続失敗回数は1以上で指定してください')
+    .max(10, '連続失敗回数は10以内で指定してください'),
+
   isEnabled: z.boolean(),
 });
 
 export type MonitorFormValues = z.infer<typeof monitorFormSchema>;
+
+/**
+ * 画面で選べる連続失敗回数。
+ *
+ * 1〜5 だけにしてある。6回以上は、どの間隔でも検知の遅れが実用の範囲を超える
+ * （5分間隔で6回なら25分、1時間間隔なら5時間）。
+ * DB は 10 まで許すが、そこは移行や実験のための余地として残してある。
+ */
+export const FAILURE_THRESHOLDS = [1, 2, 3, 4, 5] as const;
 
 /**
  * 書き込み直前の正規化。
@@ -83,5 +100,8 @@ export const MONITOR_FORM_DEFAULTS: MonitorFormValues = {
   intervalSeconds: CHECK_INTERVALS[1],
   timeoutMs: DEFAULT_TIMEOUT_MS,
   expectedStatusCode: null,
+  // 1 は瞬間的な切断でも通知が飛ぶ。2 は「もう一度確かめてから言う」の最小形で、
+  // 検知の遅れも1回ぶんに収まる（DB の既定値と揃えてある）。
+  failureThreshold: 2,
   isEnabled: true,
 };

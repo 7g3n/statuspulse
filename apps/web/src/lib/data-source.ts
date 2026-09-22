@@ -19,6 +19,7 @@
 
 import type {
   CheckRow,
+  IncidentOverviewRow,
   MonitorFormValues,
   MonitorOverviewRow,
   RecentCheckRow,
@@ -43,6 +44,11 @@ export type DashboardData = {
   recentChecks: Record<string, RecentCheckRow[]>;
 };
 
+export type IncidentQuery = {
+  monitorId?: string | undefined;
+  limit: number;
+};
+
 export type DataSource = {
   readonly kind: 'supabase' | 'mock';
 
@@ -55,6 +61,8 @@ export type DataSource = {
 
   loadDashboard(): Promise<DashboardData>;
   loadMonitorChecks(monitorId: string, limit: number): Promise<CheckRow[]>;
+  /** ダウンタイムの履歴。monitorId を省くと全対象ぶんを新しい順で返す。 */
+  loadIncidents(options: IncidentQuery): Promise<IncidentOverviewRow[]>;
 
   createMonitor(values: MonitorFormValues): Promise<void>;
   updateMonitor(monitorId: string, values: MonitorFormValues): Promise<void>;

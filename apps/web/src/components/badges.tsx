@@ -7,6 +7,7 @@
  */
 import {
   CHECK_ERROR_KIND_LABELS,
+  formatDowntime,
   formatUptimePercent,
   gradeUptime,
   MONITOR_STATUS_LABELS,
@@ -80,38 +81,43 @@ const GRADE_TEXT: Record<UptimeGrade, string> = {
 /**
  * 稼働率の表示。
  *
- * 数字そのものより「何回中何回か」の方が判断に効く場面が多い
- * （12回中12回の 100% と、2016回中2016回の 100% は重みが違う）ので、
- * 分母を必ず併記する。
+ * パーセントと一緒に、停止していた**時間**を必ず添える。
+ * 「99.6%」は正確だが直感に訴えない一方、「停止 41分」は影響の大きさがそのまま伝わる。
+ * 逆に時間だけでは期間に対する割合が分からないので、両方を並べる。
  */
 export function UptimeValue({
   ratio,
-  total,
+  downSeconds,
   unreliable = false,
 }: {
   ratio: number | null;
-  total: number;
+  downSeconds: number;
   unreliable?: boolean;
 }) {
   const grade = gradeUptime(ratio);
 
+  // 縦に積む。横並びにすると表の列が広がり、他の列が折り返してしまう。
   return (
-    <span className="inline-flex items-baseline gap-1">
-      <span className={cn('tabular text-sm font-semibold', GRADE_TEXT[grade])}>
+    <span className="inline-flex flex-col items-end leading-tight">
+      <span className={cn('tabular whitespace-nowrap text-sm font-semibold', GRADE_TEXT[grade])}>
         {formatUptimePercent(ratio)}
         {ratio !== null && <span className="text-xs font-normal">%</span>}
+        {unreliable && (
+          <span
+            className="ml-1 text-xs text-warn-700"
+            title="チェックの実行回数が想定を下回っています。定期処理が止まっていた時間の障害はそもそも記録されないため、実際より良い数字が出ている可能性があります。"
+          >
+            ⚠
+          </span>
+        )}
       </span>
-      <span className="tabular text-xs text-slate-400">
-        {total === 0 ? '未計測' : `/ ${total}回`}
+      <span className="tabular whitespace-nowrap text-xs text-slate-400">
+        {ratio === null
+          ? '未計測'
+          : downSeconds <= 0
+            ? '停止なし'
+            : `停止 ${formatDowntime(downSeconds)}`}
       </span>
-      {unreliable && (
-        <span
-          className="text-xs text-warn-700"
-          title="チェックの実行回数が想定を下回っています。定期処理が止まっていた時間は稼働率の分母から抜けるため、実際より良い数字が出ている可能性があります。"
-        >
-          ⚠
-        </span>
-      )}
     </span>
   );
 }

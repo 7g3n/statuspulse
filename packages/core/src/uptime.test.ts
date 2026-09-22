@@ -3,13 +3,75 @@ import { describe, expect, it } from 'vitest';
 import {
   checkCoverage,
   expectedCheckCount,
+  formatDowntime,
   formatResponseTime,
   formatUptimePercent,
   gradeUptime,
   isCoverageReliable,
+  observedWindowSeconds,
+  timeBasedUptime,
   uptimeRatio,
   WINDOW_SECONDS,
 } from './uptime.js';
+
+describe('timeBasedUptime', () => {
+  it('停止していた時間の割合を 1 から引く', () => {
+    // 24時間のうち 36分 停止 = 97.5%
+    expect(timeBasedUptime(2160, WINDOW_SECONDS.day)).toBeCloseTo(0.975);
+    expect(timeBasedUptime(0, WINDOW_SECONDS.day)).toBe(1);
+  });
+
+  it('期間が 0 以下なら null（まだ何も言えない）', () => {
+    expect(timeBasedUptime(0, 0)).toBeNull();
+    expect(timeBasedUptime(100, -1)).toBeNull();
+  });
+
+  /** 継続中の障害や時刻のずれで、停止時間が期間を超えることがある。 */
+  it('停止時間が期間を超えても負の稼働率は出さない', () => {
+    expect(timeBasedUptime(WINDOW_SECONDS.day * 2, WINDOW_SECONDS.day)).toBe(0);
+    expect(timeBasedUptime(-100, WINDOW_SECONDS.day)).toBe(1);
+  });
+});
+
+describe('observedWindowSeconds', () => {
+  const now = Date.parse('2026-09-22T12:00:00.000Z');
+
+  it('監視対象が十分古ければ期間はそのまま', () => {
+    const createdAt = new Date(now - 30 * 86_400_000).toISOString();
+    expect(observedWindowSeconds(createdAt, WINDOW_SECONDS.day, now)).toBe(WINDOW_SECONDS.day);
+  });
+
+  /**
+   * 登録して1時間の対象を24時間で割ると、稼働率が常に 95% 台に見える。
+   * 足りないぶんを稼働扱いにしても停止扱いにしても、どちらも実態ではない。
+   */
+  it('登録からの経過時間で頭打ちにする', () => {
+    const createdAt = new Date(now - 3600_000).toISOString();
+    expect(observedWindowSeconds(createdAt, WINDOW_SECONDS.day, now)).toBe(3600);
+  });
+
+  it('負にはならない（作成時刻が未来でも）', () => {
+    const createdAt = new Date(now + 3600_000).toISOString();
+    expect(observedWindowSeconds(createdAt, WINDOW_SECONDS.day, now)).toBe(0);
+  });
+});
+
+describe('formatDowntime', () => {
+  it('単位を切り替える', () => {
+    expect(formatDowntime(45)).toBe('45秒');
+    expect(formatDowntime(2400)).toBe('40分');
+    expect(formatDowntime(3600)).toBe('1時間');
+    expect(formatDowntime(7500)).toBe('2時間5分');
+    expect(formatDowntime(2 * 86_400)).toBe('2日');
+    expect(formatDowntime(2 * 86_400 + 3 * 3600)).toBe('2日3時間');
+  });
+
+  /** 「0分」は計測できていないようにも読める。 */
+  it('停止が無ければ「なし」', () => {
+    expect(formatDowntime(0)).toBe('なし');
+    expect(formatDowntime(-5)).toBe('なし');
+  });
+});
 
 describe('uptimeRatio', () => {
   it('成功回数 ÷ 全体を返す', () => {

@@ -6,6 +6,7 @@ import { LoadingBlock } from '@/components/ui';
 import { LoginPage } from '@/features/auth/LoginPage';
 import { SessionProvider, useSession } from '@/features/auth/session';
 import { DashboardPage } from '@/features/dashboard/DashboardPage';
+import { IncidentsPage } from '@/features/incidents/IncidentsPage';
 import { MonitorDetailPage } from '@/features/monitors/MonitorDetailPage';
 import { isMockMode, isSupabaseConfigured } from '@/lib/env';
 
@@ -41,6 +42,7 @@ function AuthenticatedApp() {
     <AppShell>
       <Routes>
         <Route path="/" element={<DashboardPage />} />
+        <Route path="/incidents" element={<IncidentsPage />} />
         <Route path="/monitors/:monitorId" element={<MonitorDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

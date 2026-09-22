@@ -6,7 +6,8 @@ import {
   formatResponseTime,
   isCheckInterval,
   isCoverageReliable,
-  uptimeRatio,
+  observedWindowSeconds,
+  timeBasedUptime,
   WINDOW_SECONDS,
   type MonitorOverviewRow,
 } from '@statuspulse/core';
@@ -81,8 +82,16 @@ function MonitorRow({
   recentChecks: Parameters<typeof CheckStrip>[0]['checks'];
   onEdit: () => void;
 }) {
-  const ratio24h = uptimeRatio({ total: monitor.checks_24h, up: monitor.up_24h });
-  const ratio7d = uptimeRatio({ total: monitor.checks_7d, up: monitor.up_7d });
+  // 稼働率は時間ベース（停止していた時間 ÷ 監視できていた期間）。
+  // 期間は監視対象の年齢で頭打ちにする（登録直後の対象を24時間で割らない）。
+  const ratio24h = timeBasedUptime(
+    monitor.down_seconds_24h,
+    observedWindowSeconds(monitor.created_at, WINDOW_SECONDS.day),
+  );
+  const ratio7d = timeBasedUptime(
+    monitor.down_seconds_7d,
+    observedWindowSeconds(monitor.created_at, WINDOW_SECONDS.week),
+  );
   const warn24h = shouldWarnCoverage(monitor, monitor.checks_24h);
 
   const interval = isCheckInterval(monitor.interval_seconds)
@@ -128,25 +137,25 @@ function MonitorRow({
       </td>
 
       <td className="px-3 py-3 text-right">
-        <UptimeValue ratio={ratio24h} total={monitor.checks_24h} unreliable={warn24h} />
+        <UptimeValue ratio={ratio24h} downSeconds={monitor.down_seconds_24h} unreliable={warn24h} />
       </td>
 
       <td className="hidden px-3 py-3 text-right sm:table-cell">
-        <UptimeValue ratio={ratio7d} total={monitor.checks_7d} />
+        <UptimeValue ratio={ratio7d} downSeconds={monitor.down_seconds_7d} />
       </td>
 
-      <td className="tabular hidden px-3 py-3 text-right text-sm text-slate-600 md:table-cell">
+      <td className="tabular hidden whitespace-nowrap px-3 py-3 text-right text-sm text-slate-600 md:table-cell">
         {formatResponseTime(monitor.avg_response_time_ms)}
       </td>
 
       <td
-        className="hidden px-3 py-3 text-right text-xs text-slate-500 md:table-cell"
+        className="hidden whitespace-nowrap px-3 py-3 text-right text-xs text-slate-500 md:table-cell"
         title={monitor.last_checked_at ?? undefined}
       >
         {monitor.is_enabled ? formatRelativeTime(monitor.last_checked_at) : '—'}
       </td>
 
-      <td className="py-3 pl-3 pr-4 text-right">
+      <td className="whitespace-nowrap py-3 pl-3 pr-4 text-right">
         <Button size="sm" variant="ghost" onClick={onEdit}>
           編集
         </Button>
@@ -236,7 +245,7 @@ export function DashboardPage() {
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[720px]">
                   <thead>
-                    <tr className="text-xs text-slate-500">
+                    <tr className="whitespace-nowrap text-xs text-slate-500">
                       <th className="py-2.5 pl-4 pr-3 text-left font-medium">状態</th>
                       <th className="px-3 py-2.5 text-left font-medium">監視対象</th>
                       <th className="hidden px-3 py-2.5 text-left font-medium lg:table-cell">

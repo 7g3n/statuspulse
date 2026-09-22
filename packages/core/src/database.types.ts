@@ -64,6 +64,7 @@ export type Database = {
           current_status: Database['public']['Enums']['monitor_status'];
           consecutive_failures: number;
           failure_threshold: number;
+          first_failure_at: string | null;
           last_checked_at: string | null;
           status_changed_at: string | null;
           created_at: string;
@@ -133,6 +134,59 @@ export type Database = {
           },
         ];
       };
+
+      incidents: {
+        Row: {
+          id: string;
+          monitor_id: string;
+          started_at: string;
+          ended_at: string | null;
+          cause: Database['public']['Enums']['check_error_kind'];
+          status_code: number | null;
+          error_message: string | null;
+          failure_count: number;
+          created_at: string;
+        };
+        /** 開閉は record_check() のみ。 */
+        Insert: Record<string, never>;
+        Update: Record<string, never>;
+        Relationships: [
+          {
+            foreignKeyName: 'incidents_monitor_id_fkey';
+            columns: ['monitor_id'];
+            isOneToOne: false;
+            referencedRelation: 'monitors';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+
+      notifications: {
+        Row: {
+          id: number;
+          kind: Database['public']['Enums']['notification_kind'];
+          dedupe_key: string;
+          monitor_id: string | null;
+          incident_id: string | null;
+          payload: Json;
+          status: Database['public']['Enums']['notification_status'];
+          claimed_at: string;
+          settled_at: string | null;
+          error_message: string | null;
+        };
+        /** 記録は claim_notification() / settle_notification() のみ。 */
+        Insert: Record<string, never>;
+        Update: Record<string, never>;
+        Relationships: [
+          {
+            foreignKeyName: 'notifications_incident_id_fkey';
+            columns: ['incident_id'];
+            isOneToOne: false;
+            referencedRelation: 'incidents';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
     };
 
     Views: {
@@ -150,6 +204,7 @@ export type Database = {
           current_status: Database['public']['Enums']['monitor_status'];
           consecutive_failures: number;
           failure_threshold: number;
+          first_failure_at: string | null;
           last_checked_at: string | null;
           status_changed_at: string | null;
           created_at: string;
@@ -159,10 +214,36 @@ export type Database = {
           checks_7d: number;
           up_7d: number;
           avg_response_time_ms: number | null;
+          /** 直近24時間のうち、停止していた秒数（期間と重なるぶんだけ）。 */
+          down_seconds_24h: number;
+          down_seconds_7d: number;
+          incidents_7d: number;
+          /** 継続中のインシデント。無ければ null。 */
+          open_incident_id: string | null;
           last_status_code: number | null;
           last_response_time_ms: number | null;
           last_error_kind: Database['public']['Enums']['check_error_kind'] | null;
           last_error_message: string | null;
+        };
+        Relationships: [];
+      };
+
+      incident_overview: {
+        Row: {
+          id: string;
+          monitor_id: string;
+          monitor_name: string;
+          monitor_url: string;
+          monitor_is_enabled: boolean;
+          started_at: string;
+          ended_at: string | null;
+          cause: Database['public']['Enums']['check_error_kind'];
+          status_code: number | null;
+          error_message: string | null;
+          failure_count: number;
+          duration_seconds: number;
+          down_notification_status: Database['public']['Enums']['notification_status'] | null;
+          recovered_notification_status: Database['public']['Enums']['notification_status'] | null;
         };
         Relationships: [];
       };
@@ -178,6 +259,7 @@ export type Database = {
           url: string;
           method: Database['public']['Enums']['http_method'];
           expected_status_code: number | null;
+          interval_seconds: number;
           timeout_ms: number;
           failure_threshold: number;
           current_status: Database['public']['Enums']['monitor_status'];
@@ -204,6 +286,28 @@ export type Database = {
         Returns: number;
       };
 
+      /** 定期処理（service_role）専用。新しく記録できたら true（= これから送る）。 */
+      claim_notification: {
+        Args: {
+          p_kind: Database['public']['Enums']['notification_kind'];
+          p_dedupe_key: string;
+          p_monitor_id: string;
+          p_incident_id: string;
+          p_payload?: Json;
+        };
+        Returns: boolean;
+      };
+
+      /** 定期処理（service_role）専用。送信の結果を書き戻す。 */
+      settle_notification: {
+        Args: {
+          p_dedupe_key: string;
+          p_status: Database['public']['Enums']['notification_status'];
+          p_error_message?: string | null;
+        };
+        Returns: undefined;
+      };
+
       /** 画面から呼ぶ。SECURITY INVOKER なので RLS がそのまま効く。 */
       recent_checks: {
         Args: { p_limit?: number };
@@ -224,6 +328,8 @@ export type Database = {
       check_result: 'up' | 'down';
       check_error_kind: 'timeout' | 'dns' | 'tls' | 'network' | 'status' | 'unknown';
       http_method: 'GET' | 'HEAD';
+      notification_kind: 'monitor_down' | 'monitor_recovered';
+      notification_status: 'pending' | 'sent' | 'failed' | 'skipped';
     };
 
     CompositeTypes: Record<string, never>;
@@ -240,6 +346,9 @@ export type MonitorUpdate = Database['public']['Tables']['monitors']['Update'];
 export type CheckRow = Database['public']['Tables']['checks']['Row'];
 export type ProfileRow = Database['public']['Tables']['profiles']['Row'];
 export type MonitorOverviewRow = Database['public']['Views']['monitor_overview']['Row'];
+export type IncidentRow = Database['public']['Tables']['incidents']['Row'];
+export type IncidentOverviewRow = Database['public']['Views']['incident_overview']['Row'];
+export type NotificationRow = Database['public']['Tables']['notifications']['Row'];
 export type RecentCheckRow = Database['public']['Functions']['recent_checks']['Returns'][number];
 export type DueMonitorRow = Database['public']['Functions']['due_monitors']['Returns'][number];
 
@@ -249,5 +358,9 @@ export type RecordCheckResult = {
   previous_status: Database['public']['Enums']['monitor_status'];
   status: Database['public']['Enums']['monitor_status'];
   consecutive_failures: number;
+  failure_threshold: number;
   event: 'went_down' | 'recovered' | null;
+  /** 継続中（または今閉じた）インシデント。通知の重複判定に使う。 */
+  incident_id: string | null;
+  incident_started_at: string | null;
 };

@@ -10,6 +10,8 @@
  */
 
 export * from './monitor.js';
+export * from './incident.js';
+export * from './slack.js';
 export * from './uptime.js';
 export * from './url.js';
 export * from './errors.js';

@@ -18,10 +18,16 @@
  */
 import type { Database, DueMonitorRow, RecordCheckResult } from '@statuspulse/core';
 import {
+  buildDownMessage,
+  buildRecoveredMessage,
   classifyFetchError,
+  downDedupeKey,
+  incidentDurationSeconds,
   observeFailure,
   observeResponse,
+  recoveredDedupeKey,
   type CheckObservation,
+  type SlackMessage,
 } from '@statuspulse/core';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
@@ -29,6 +35,10 @@ export type Env = {
   SUPABASE_URL: string;
   /** service_role キー。`wrangler secret put SUPABASE_SERVICE_ROLE_KEY` で登録する。 */
   SUPABASE_SERVICE_ROLE_KEY: string;
+  /** Slack の Incoming Webhook。未設定ならログ出力のみになる。 */
+  SLACK_WEBHOOK_URL?: string;
+  /** 通知内のリンク先。未設定ならリンクを出さない。 */
+  APP_URL?: string;
   /** 1回の起動で扱う監視対象の上限（wrangler.toml の vars）。 */
   MAX_MONITORS_PER_RUN?: string;
   /** 同時に投げるチェックの数（wrangler.toml の vars）。 */
@@ -144,6 +154,124 @@ async function saveCheck(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Slack 通知                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Slack へ送る。
+ *
+ * Webhook が未設定なら、組み立てた内容をログに出して 'skipped' を返す。
+ * 通知先が無いだけで定期処理全体を失敗させない（監視の判定そのものは動いていてほしい）。
+ */
+async function sendToSlack(env: Env, message: SlackMessage): Promise<'sent' | 'skipped'> {
+  if (!env.SLACK_WEBHOOK_URL) {
+    console.log('[slack 未設定のため送信せず]', message.text);
+    return 'skipped';
+  }
+
+  const response = await fetch(env.SLACK_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(message),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Slack への送信に失敗しました: ${response.status} ${await response.text()}`);
+  }
+
+  return 'sent';
+}
+
+export type NotifyOutcome = 'sent' | 'skipped' | 'duplicate' | 'failed';
+
+/**
+ * 状態が変わったときに1通だけ通知する。
+ *
+ * **送信より先に DB へ記録する。** claim_notification() が false を返したら
+ * 既に誰かが送っている（か、送ろうとしている）ので、何もしない。
+ *
+ * 逆順（送ってから記録）にすると、送信成功後に記録へ失敗したときに二重送信になる。
+ * この順序だと送信失敗時に通知が欠けるが、欠けたことは status = 'failed' として
+ * 画面に残るので、黙って消えることはない。
+ *
+ * 重複判定の鍵は incident の ID から作る。時刻で追う方式は、
+ * 実行が飛べば取りこぼし、二度走れば重複する。
+ */
+async function notifyTransition(
+  env: Env,
+  supabase: Client,
+  monitor: DueMonitorRow,
+  observation: CheckObservation,
+  recorded: RecordCheckResult,
+  now: Date,
+): Promise<NotifyOutcome | null> {
+  if (recorded.event === null || recorded.incident_id === null) return null;
+
+  const isDown = recorded.event === 'went_down';
+  const dedupeKey = isDown
+    ? downDedupeKey(recorded.incident_id)
+    : recoveredDedupeKey(recorded.incident_id);
+
+  const { data: claimed, error: claimError } = await supabase.rpc('claim_notification', {
+    p_kind: isDown ? 'monitor_down' : 'monitor_recovered',
+    p_dedupe_key: dedupeKey,
+    p_monitor_id: monitor.id,
+    p_incident_id: recorded.incident_id,
+    p_payload: { monitor_name: monitor.name, url: monitor.url, event: recorded.event },
+  });
+
+  if (claimError) throw new Error(`通知の記録に失敗しました: ${claimError.message}`);
+  if (claimed !== true) return 'duplicate';
+
+  const startedAt = recorded.incident_started_at ?? now.toISOString();
+
+  const message = isDown
+    ? buildDownMessage(
+        {
+          monitorName: monitor.name,
+          url: monitor.url,
+          cause: observation.errorKind ?? 'unknown',
+          statusCode: observation.statusCode,
+          errorMessage: observation.errorMessage,
+          startedAt,
+          failureCount: recorded.consecutive_failures,
+          failureThreshold: recorded.failure_threshold,
+          intervalSeconds: monitor.interval_seconds,
+        },
+        { appUrl: env.APP_URL },
+      )
+    : buildRecoveredMessage(
+        {
+          monitorName: monitor.name,
+          url: monitor.url,
+          startedAt,
+          endedAt: now.toISOString(),
+          downtimeSeconds: incidentDurationSeconds(
+            { startedAt, endedAt: now.toISOString() },
+            now.getTime(),
+          ),
+        },
+        { appUrl: env.APP_URL },
+      );
+
+  try {
+    const outcome = await sendToSlack(env, message);
+    await supabase.rpc('settle_notification', { p_dedupe_key: dedupeKey, p_status: outcome });
+    return outcome;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await supabase.rpc('settle_notification', {
+      p_dedupe_key: dedupeKey,
+      p_status: 'failed',
+      p_error_message: reason,
+    });
+    // 通知の失敗でチェックそのものを失敗させない。記録は残っているので後から追える。
+    console.error('通知の送信に失敗しました', reason);
+    return 'failed';
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* 実行の本体                                                                  */
 /* -------------------------------------------------------------------------- */
 
@@ -184,6 +312,8 @@ export type CheckedMonitor = {
   responseTimeMs: number | null;
   status: RecordCheckResult['status'];
   event: RecordCheckResult['event'];
+  /** 通知の結果。状態が変わらなかった回は null。 */
+  notified?: NotifyOutcome | null;
   /** 記録そのものに失敗した場合のメッセージ。次回の起動で再チェックされる。 */
   saveError?: string;
 };
@@ -199,7 +329,7 @@ export type RunResult = {
 };
 
 /** 定期処理の本体。fetch ハンドラからも呼べるように切り出してある。 */
-export async function runChecks(env: Env): Promise<RunResult> {
+export async function runChecks(env: Env, now = new Date()): Promise<RunResult> {
   const supabase = createSupabaseClient(env);
   const limit = numberFromEnv(env.MAX_MONITORS_PER_RUN, 20);
   const concurrency = numberFromEnv(env.CHECK_CONCURRENCY, 5);
@@ -220,6 +350,10 @@ export async function runChecks(env: Env): Promise<RunResult> {
 
     try {
       const recorded = await saveCheck(supabase, monitor, observation);
+
+      // 通知は「状態が変わった回」だけ。継続中の障害では鳴らさない。
+      const notified = await notifyTransition(env, supabase, monitor, observation, recorded, now);
+
       return {
         name: monitor.name,
         url: monitor.url,
@@ -228,6 +362,7 @@ export async function runChecks(env: Env): Promise<RunResult> {
         responseTimeMs: observation.responseTimeMs,
         status: recorded.status,
         event: recorded.event,
+        notified,
       } satisfies CheckedMonitor;
     } catch (saveError) {
       // 記録に失敗しても他の対象の処理は続ける。
@@ -285,9 +420,6 @@ export default {
         const result = await runChecks(env);
 
         if (result.transitions.length > 0) {
-          // Phase 2 でここから Slack に通知する。
-          // 送信より先に DB へ記録して重複を防ぐ設計にするため、Worker 側で
-          // 「前回と比べる」処理は持たず、record_check() が返す event をそのまま使う。
           console.log('状態が変化した対象', JSON.stringify(result.transitions));
         }
 

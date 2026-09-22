@@ -253,12 +253,105 @@ grant execute on function due_monitors(integer, integer) to service_role;
 
 ---
 
-## Phase 2 以降で追加する予定のもの
+## Phase 2 で追加したもの
 
-| 追加するもの                   | 何のために                                           |
-| ------------------------------ | ---------------------------------------------------- |
-| `incidents` テーブル           | ダウンタイムの期間を持ち、時間ベースの稼働率に移行   |
-| `notifications` テーブル       | 送信前に記録して Slack 通知の重複を防ぐ              |
-| `failure_threshold` の UI 公開 | 連続N回失敗でダウンと判定する（列は Phase 1 にある） |
-| `status_pages` テーブル        | 公開ステータスページの発行（認証不要の SELECT）      |
-| `monitor_members` テーブル     | チームでの共有。`monitors` の RLS を張り替える       |
+### incidents
+
+ダウンの**期間**。`checks`（点）から導かれる集約だが、都度計算せずテーブルとして持つ（[`decisions.md`](./decisions.md) の判断 17）。
+
+| 列              | 型               | 備考                                        |
+| --------------- | ---------------- | ------------------------------------------- |
+| `monitor_id`    | uuid             | 対象削除で連動削除                          |
+| `started_at`    | timestamptz      | **最初に失敗した**チェックの時刻            |
+| `ended_at`      | timestamptz NULL | 復旧を確認したチェックの時刻。NULL は継続中 |
+| `cause`         | check_error_kind | 検知したときの失敗の種類                    |
+| `failure_count` | integer          | この障害の間に失敗したチェックの回数        |
+
+**`started_at` が「判定した時刻」ではない理由**: 閾値を N にすると down と判定されるのは N 回目だが、実際に落ちていたのは1回目から。判定時刻を起点にすると、ダウンタイムが「間隔 × (N−1)」ぶん短く記録される。そのために `monitors.first_failure_at` を持つ。
+
+**`ended_at` に成功の時刻を採る理由**: 実際に直ったのは「最後の失敗」と「最初の成功」の間のどこかで、正確には分からない。監視できていない区間を「直っていた」側に数えると稼働率が実態より良くなるので、疑わしい区間はダウン側に入れる。
+
+**不変条件（DB 側で保証）**
+
+```sql
+create unique index incidents_one_open_per_monitor on incidents (monitor_id)
+  where ended_at is null;
+```
+
+「1つの監視対象に、継続中の障害は1本まで」。破れると稼働率が二重計上される。`record_check()` が正しければ破れないが、ロジックが正しいことに依存しないために制約を置く。
+
+### notifications
+
+送信した（これから送る）通知の台帳。
+
+| 列           | 型                  | 備考                                      |
+| ------------ | ------------------- | ----------------------------------------- |
+| `kind`       | notification_kind   | `monitor_down` / `monitor_recovered`      |
+| `dedupe_key` | text UNIQUE         | `monitor_down:<incident_id>` の形         |
+| `status`     | notification_status | `pending` / `sent` / `failed` / `skipped` |
+| `claimed_at` | timestamptz         | 宣言した時刻（送信の**前**）              |
+| `settled_at` | timestamptz         | 結果が確定した時刻                        |
+
+**鍵を incident の ID から作る**のが要点。時刻で追う方式は、実行が飛べば取りこぼし、二度走れば重複する。障害そのものに紐づく鍵なら、いつ何度走っても結果が同じになる。
+
+`status` を持つのは、通知が来なかったときに「送っていない」のか「送ったが届いていない」のかを切り分けるため。画面のタイムラインに表示している。
+
+### monitors への追加
+
+| 列                 | 型               | 備考                                            |
+| ------------------ | ---------------- | ----------------------------------------------- |
+| `first_failure_at` | timestamptz NULL | 続いている失敗の1回目の時刻。成功で NULL に戻る |
+
+`failure_threshold` の既定値を 1 から **2** に変更した。列自体は Phase 1 から存在する。
+
+### record_check() の拡張
+
+チェック1回で起きる書き込みが4つになった。すべて同じトランザクションで行う。
+
+1. `checks` への追記
+2. `monitors` の判定更新（`first_failure_at` を含む）
+3. `incidents` の開閉
+4. 継続中インシデントの `failure_count` 加算
+
+戻り値に `incident_id` / `incident_started_at` / `failure_threshold` が加わった。通知側が「前回の状態と比べる」処理を持たなくて済むようにするため。
+
+### claim_notification(kind, dedupe_key, monitor_id, incident_id, payload)
+
+送る前に宣言する。`insert ... on conflict do nothing` の結果で判定し、新しく記録できたときだけ `true`。service_role 専用。
+
+判定と記録を別のクエリに分けると、その隙間で複数の Worker が両方とも「まだ送っていない」と判断しうる。
+
+### settle_notification(dedupe_key, status, error_message)
+
+送信の結果を書き戻す。service_role 専用。
+
+### monitor_overview の拡張
+
+| 列                                     | 内容                                  |
+| -------------------------------------- | ------------------------------------- |
+| `down_seconds_24h` / `down_seconds_7d` | 期間と**重なるぶんだけ**の停止秒数    |
+| `incidents_7d`                         | 直近7日間の障害件数                   |
+| `open_incident_id`                     | 継続中のインシデント（無ければ NULL） |
+
+期間をまたぐ障害は `least` / `greatest` で切り詰める。「7日前に始まって今も続いている障害」を全期間ぶん数えると、7日間の稼働率が 0% になってしまう。
+
+割り算はここでも行わない。稼働率の計算と表示（`timeBasedUptime()` / `formatUptimePercent()`）は TypeScript 側にあり、テストで押さえている。
+
+### incident_overview
+
+タイムライン画面が使うビュー。`incidents` に監視対象名と、ダウン／復旧それぞれの通知状態を結合したもの。`security_invoker = on`。
+
+### 権限
+
+Phase 1 と同じ方針。`incidents` と `notifications` はどちらも `authenticated` に **SELECT のみ**。開閉と記録は SECURITY DEFINER 関数（service_role 専用）に閉じてある。
+
+---
+
+## Phase 3 以降で追加する予定のもの
+
+| 追加するもの               | 何のために                                      |
+| -------------------------- | ----------------------------------------------- |
+| `status_pages` テーブル    | 公開ステータスページの発行（認証不要の SELECT） |
+| `monitor_members` テーブル | チームでの共有。`monitors` の RLS を張り替える  |
+| `incidents.postmortem`     | 障害へのメモ（Phase 4）                         |
+| SSL 証明書の期限           | `monitors` に検査結果を持つ列を足す（Phase 4）  |

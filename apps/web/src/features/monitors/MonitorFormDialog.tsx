@@ -2,6 +2,9 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import {
   CHECK_INTERVAL_LABELS,
   CHECK_INTERVALS,
+  detectionDelaySeconds,
+  FAILURE_THRESHOLDS,
+  formatDowntime,
   HTTP_METHODS,
   isCheckInterval,
   MONITOR_FORM_DEFAULTS,
@@ -32,6 +35,7 @@ function toFormValues(monitor: MonitorOverviewRow): MonitorFormValues {
     intervalSeconds: isCheckInterval(monitor.interval_seconds)
       ? monitor.interval_seconds
       : MONITOR_FORM_DEFAULTS.intervalSeconds,
+    failureThreshold: monitor.failure_threshold,
     timeoutMs: monitor.timeout_ms,
     expectedStatusCode: monitor.expected_status_code,
     isEnabled: monitor.is_enabled,
@@ -56,6 +60,7 @@ export function MonitorFormDialog({
     register,
     handleSubmit,
     reset,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<MonitorFormValues>({
     resolver: zodResolver(monitorFormSchema),
@@ -69,6 +74,19 @@ export function MonitorFormDialog({
     reset(monitor ? toFormValues(monitor) : MONITOR_FORM_DEFAULTS);
     setSubmitError(null);
   }, [open, monitor, reset]);
+
+  /**
+   * 閾値を上げると誤検知は減るが、そのぶん検知が遅れる。
+   * 選んでいるその場で遅れの大きさを出す。トレードオフを数字にしないと利用者は選べない
+   * （1時間間隔で3回は、最大2時間気付けないという意味になる）。
+   */
+  const intervalSeconds = watch('intervalSeconds');
+  const failureThreshold = watch('failureThreshold');
+  const delaySeconds = detectionDelaySeconds(intervalSeconds, failureThreshold);
+  const thresholdHint =
+    delaySeconds === 0
+      ? '1回でも失敗したら異常とみなす。瞬間的な切断でも通知が飛ぶ'
+      : `検知が最大 ${formatDowntime(delaySeconds)} 遅れる代わりに、瞬間的な切断では通知しない`;
 
   async function onSubmit(values: MonitorFormValues) {
     setSubmitError(null);
@@ -176,6 +194,21 @@ export function MonitorFormDialog({
             />
           </Field>
         </div>
+
+        <Field
+          label="異常と判定する連続失敗回数"
+          htmlFor="failureThreshold"
+          hint={thresholdHint}
+          error={errors.failureThreshold?.message}
+        >
+          <Select id="failureThreshold" {...register('failureThreshold', { valueAsNumber: true })}>
+            {FAILURE_THRESHOLDS.map((threshold) => (
+              <option key={threshold} value={threshold}>
+                {threshold}回
+              </option>
+            ))}
+          </Select>
+        </Field>
 
         <label className="flex items-start gap-2.5">
           <input

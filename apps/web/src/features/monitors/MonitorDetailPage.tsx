@@ -1,10 +1,14 @@
 import {
   CHECK_ERROR_KIND_LABELS,
   CHECK_INTERVAL_LABELS,
+  detectionDelaySeconds,
   displayUrl,
+  formatDowntime,
   formatResponseTime,
   isCheckInterval,
-  uptimeRatio,
+  observedWindowSeconds,
+  timeBasedUptime,
+  WINDOW_SECONDS,
 } from '@statuspulse/core';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -12,6 +16,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { StatusBadge, UptimeValue } from '@/components/badges';
 import { Button, Card, EmptyBlock, ErrorBlock, LoadingBlock, PageHeader } from '@/components/ui';
 import { useDashboard } from '@/features/dashboard/api';
+import { useIncidents } from '@/features/incidents/api';
+import { IncidentTimeline } from '@/features/incidents/IncidentTimeline';
 import { formatDateTime, formatDuration } from '@/lib/format';
 
 import { MonitorFormDialog } from './MonitorFormDialog';
@@ -31,6 +37,7 @@ export function MonitorDetailPage() {
 
   const dashboard = useDashboard();
   const checks = useMonitorChecks(monitorId);
+  const incidents = useIncidents(monitorId);
   const deleteMonitor = useDeleteMonitor();
 
   const [editOpen, setEditOpen] = useState(false);
@@ -70,11 +77,19 @@ export function MonitorDetailPage() {
     );
   }
 
-  const ratio24h = uptimeRatio({ total: monitor.checks_24h, up: monitor.up_24h });
-  const ratio7d = uptimeRatio({ total: monitor.checks_7d, up: monitor.up_7d });
+  const ratio24h = timeBasedUptime(
+    monitor.down_seconds_24h,
+    observedWindowSeconds(monitor.created_at, WINDOW_SECONDS.day),
+  );
+  const ratio7d = timeBasedUptime(
+    monitor.down_seconds_7d,
+    observedWindowSeconds(monitor.created_at, WINDOW_SECONDS.week),
+  );
   const interval = isCheckInterval(monitor.interval_seconds)
     ? CHECK_INTERVAL_LABELS[monitor.interval_seconds]
     : `${monitor.interval_seconds}秒`;
+
+  const detectionDelay = detectionDelaySeconds(monitor.interval_seconds, monitor.failure_threshold);
 
   async function onDelete() {
     await deleteMonitor.mutateAsync(monitorId);
@@ -118,15 +133,19 @@ export function MonitorDetailPage() {
         <Card className="px-4 py-3">
           <p className="text-xs text-slate-500">24時間の稼働率</p>
           <div className="mt-2">
-            <UptimeValue ratio={ratio24h} total={monitor.checks_24h} />
+            <UptimeValue ratio={ratio24h} downSeconds={monitor.down_seconds_24h} />
           </div>
+          <p className="tabular mt-1.5 text-xs text-slate-400">{monitor.checks_24h} 回のチェック</p>
         </Card>
 
         <Card className="px-4 py-3">
           <p className="text-xs text-slate-500">7日間の稼働率</p>
           <div className="mt-2">
-            <UptimeValue ratio={ratio7d} total={monitor.checks_7d} />
+            <UptimeValue ratio={ratio7d} downSeconds={monitor.down_seconds_7d} />
           </div>
+          <p className="tabular mt-1.5 text-xs text-slate-400">
+            障害 {monitor.incidents_7d} 件 / {monitor.checks_7d} 回のチェック
+          </p>
         </Card>
 
         <Card className="px-4 py-3">
@@ -154,9 +173,42 @@ export function MonitorDetailPage() {
           </div>
           <div className="flex justify-between gap-4 border-b border-slate-100 py-1.5">
             <dt className="text-slate-500">異常と判定する連続失敗回数</dt>
-            <dd className="tabular text-slate-900">{monitor.failure_threshold} 回</dd>
+            <dd className="tabular text-slate-900">
+              {monitor.failure_threshold} 回
+              {detectionDelay > 0 && (
+                <span className="ml-1.5 text-xs text-slate-400">
+                  （検知が最大 {formatDowntime(detectionDelay)} 遅れる）
+                </span>
+              )}
+            </dd>
           </div>
         </dl>
+      </Card>
+
+      <Card className="px-5 py-5">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold text-slate-900">ダウンタイム履歴</h2>
+          <Link
+            to="/incidents"
+            className="text-xs text-slate-500 hover:text-brand-700 hover:underline"
+          >
+            すべての対象を見る
+          </Link>
+        </div>
+
+        <div className="mt-4">
+          {incidents.isPending ? (
+            <LoadingBlock />
+          ) : incidents.error ? (
+            <ErrorBlock error={incidents.error} onRetry={() => void incidents.refetch()} />
+          ) : (incidents.data ?? []).length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-500">
+              この対象が異常と判定されたことはありません。
+            </p>
+          ) : (
+            <IncidentTimeline incidents={incidents.data ?? []} showMonitor={false} />
+          )}
+        </div>
       </Card>
 
       <Card className="overflow-hidden">

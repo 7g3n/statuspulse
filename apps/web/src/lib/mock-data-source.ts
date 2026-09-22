@@ -20,12 +20,18 @@ import type {
   CheckResult,
   CheckRow,
   HttpMethod,
+  IncidentOverviewRow,
   MonitorFormValues,
   MonitorOverviewRow,
   MonitorState,
   RecentCheckRow,
 } from '@statuspulse/core';
-import { nextMonitorState, normalizeMonitorValues } from '@statuspulse/core';
+import {
+  incidentDurationSeconds,
+  nextMonitorState,
+  normalizeMonitorValues,
+  totalDowntimeSeconds,
+} from '@statuspulse/core';
 
 import type { DashboardData, DataSource, SessionUser } from './data-source';
 import { RECENT_CHECK_COUNT } from './data-source';
@@ -88,7 +94,10 @@ function initialMonitors(now: number): MockMonitor[] {
       intervalSeconds: 300,
       timeoutMs: 10_000,
       isEnabled: true,
-      failureThreshold: 1,
+      // ここだけ 3 にしてある。5日前の32分の障害はインシデントになるが、
+      // 2日前の10分の瞬断（5分間隔なので2回）は閾値に届かず無視される。
+      // 「誤検知を減らす」設定が実際に何を落とすのかを画面で見せるため。
+      failureThreshold: 3,
       baseResponseMs: 180,
       createdAtMs,
       incidents: [
@@ -117,7 +126,7 @@ function initialMonitors(now: number): MockMonitor[] {
       intervalSeconds: 300,
       timeoutMs: 5_000,
       isEnabled: true,
-      failureThreshold: 1,
+      failureThreshold: 2,
       baseResponseMs: 90,
       createdAtMs,
       incidents: [
@@ -139,7 +148,7 @@ function initialMonitors(now: number): MockMonitor[] {
       intervalSeconds: 900,
       timeoutMs: 10_000,
       isEnabled: true,
-      failureThreshold: 1,
+      failureThreshold: 2,
       baseResponseMs: 45,
       createdAtMs,
       // 障害なし。稼働率 100% の見え方を確かめるため。
@@ -154,7 +163,7 @@ function initialMonitors(now: number): MockMonitor[] {
       intervalSeconds: 300,
       timeoutMs: 3_000,
       isEnabled: true,
-      failureThreshold: 1,
+      failureThreshold: 2,
       baseResponseMs: 60,
       createdAtMs,
       incidents: [
@@ -177,7 +186,7 @@ function initialMonitors(now: number): MockMonitor[] {
       intervalSeconds: 1800,
       timeoutMs: 10_000,
       isEnabled: false,
-      failureThreshold: 1,
+      failureThreshold: 2,
       baseResponseMs: 210,
       createdAtMs,
       incidents: [],
@@ -224,38 +233,109 @@ function generateChecks(monitor: MockMonitor, now: number): CheckRow[] {
   return checks;
 }
 
+type Replayed = {
+  state: MonitorState;
+  statusChangedAt: string | null;
+  firstFailureAt: string | null;
+  incidents: IncidentOverviewRow[];
+};
+
+/** まだ一度もチェックされていない対象（登録直後）の再生結果。 */
+const EMPTY_REPLAY: Replayed = {
+  state: { status: 'unknown', consecutiveFailures: 0 },
+  statusChangedAt: null,
+  firstFailureAt: null,
+  incidents: [],
+};
+
 /**
- * 履歴から現在の状態を導く。
+ * 履歴から現在の状態とインシデントを導く。
  *
- * 本番と同じ nextMonitorState() を先頭から順に通す。
- * モック専用の判定を書くと、画面で確かめているものが本番の挙動と別物になる。
+ * 本番と同じ nextMonitorState() を先頭から順に通し、record_check() と同じ規則で
+ * インシデントを開閉する。モック専用の判定を書くと、画面で確かめているものが
+ * 本番の挙動と別物になる。
+ *
+ * インシデントの開始時刻に firstFailureAt を使うところも本番と同じ。
+ * 閾値が 2 以上のとき、判定が確定するのは N 回目だが、落ちていたのは1回目から。
  */
-function replayState(checks: readonly CheckRow[], failureThreshold: number) {
+function replay(monitor: MockMonitor, checks: readonly CheckRow[]): Replayed {
   let state: MonitorState = { status: 'unknown', consecutiveFailures: 0 };
   let statusChangedAt: string | null = null;
+  let firstFailureAt: string | null = null;
+  let open: IncidentOverviewRow | null = null;
+  const incidents: IncidentOverviewRow[] = [];
 
   for (const check of checks) {
-    const next = nextMonitorState(state, check.result, failureThreshold);
+    const next = nextMonitorState(state, check.result, monitor.failureThreshold);
+
+    if (check.result === 'up') {
+      firstFailureAt = null;
+      if (open) {
+        open.ended_at = check.checked_at;
+        open = null;
+      }
+    } else {
+      firstFailureAt ??= check.checked_at;
+
+      if (next.event === 'went_down') {
+        open = {
+          id: `${monitor.id}-${incidents.length + 1}`,
+          monitor_id: monitor.id,
+          monitor_name: monitor.name,
+          monitor_url: monitor.url,
+          monitor_is_enabled: monitor.isEnabled,
+          started_at: firstFailureAt,
+          ended_at: null,
+          cause: check.error_kind ?? 'unknown',
+          status_code: check.status_code,
+          error_message: check.error_message,
+          failure_count: next.consecutiveFailures,
+          duration_seconds: 0,
+          // モックには定期処理がいないので、送信済みとして見せる。
+          down_notification_status: 'sent',
+          recovered_notification_status: null,
+        };
+        incidents.push(open);
+      } else if (open) {
+        open.failure_count += 1;
+      }
+    }
+
     if (next.status !== state.status) statusChangedAt = check.checked_at;
     state = { status: next.status, consecutiveFailures: next.consecutiveFailures };
   }
 
-  return { state, statusChangedAt };
+  for (const incident of incidents) {
+    incident.duration_seconds = Math.round(
+      incidentDurationSeconds({ startedAt: incident.started_at, endedAt: incident.ended_at }),
+    );
+    if (incident.ended_at !== null) incident.recovered_notification_status = 'sent';
+  }
+
+  return { state, statusChangedAt, firstFailureAt, incidents };
 }
 
 /** monitor_overview ビューと同じ数え方で集計する。 */
 function buildOverview(
   monitor: MockMonitor,
   checks: readonly CheckRow[],
+  replayed: Replayed,
   now: number,
 ): MonitorOverviewRow {
   const dayAgo = now - 24 * HOUR_MS;
+  const weekAgo = now - WEEK_MS;
   const within24h = checks.filter((check) => Date.parse(check.checked_at) >= dayAgo);
   const responseTimes = within24h
     .map((check) => check.response_time_ms)
     .filter((value): value is number => value !== null);
 
-  const { state, statusChangedAt } = replayState(checks, monitor.failureThreshold);
+  const { state, statusChangedAt, firstFailureAt, incidents } = replayed;
+
+  const periods = incidents.map((incident) => ({
+    startedAt: incident.started_at,
+    endedAt: incident.ended_at,
+  }));
+
   const latest = checks[checks.length - 1];
 
   return {
@@ -271,6 +351,7 @@ function buildOverview(
     current_status: state.status,
     consecutive_failures: state.consecutiveFailures,
     failure_threshold: monitor.failureThreshold,
+    first_failure_at: firstFailureAt,
     last_checked_at: latest?.checked_at ?? null,
     status_changed_at: statusChangedAt,
     created_at: new Date(monitor.createdAtMs).toISOString(),
@@ -283,6 +364,15 @@ function buildOverview(
       responseTimes.length === 0
         ? null
         : Math.round(responseTimes.reduce((sum, value) => sum + value, 0) / responseTimes.length),
+
+    // ビューと同じく、期間と重なるぶんだけを足す。
+    down_seconds_24h: Math.round(totalDowntimeSeconds(periods, dayAgo, now)),
+    down_seconds_7d: Math.round(totalDowntimeSeconds(periods, weekAgo, now)),
+    incidents_7d: incidents.filter(
+      (incident) => Date.parse(incident.ended_at ?? new Date(now).toISOString()) >= weekAgo,
+    ).length,
+    open_incident_id: incidents.find((incident) => incident.ended_at === null)?.id ?? null,
+
     last_status_code: latest?.status_code ?? null,
     last_response_time_ms: latest?.response_time_ms ?? null,
     last_error_kind: latest?.error_kind ?? null,
@@ -308,6 +398,11 @@ export function createMockDataSource(): DataSource {
     monitors.map((monitor) => [monitor.id, generateChecks(monitor, now)]),
   );
 
+  // 再生は一度だけ。7日ぶんのチェックを画面の描画ごとに流し直す必要はない。
+  const replayByMonitor = new Map<string, Replayed>(
+    monitors.map((monitor) => [monitor.id, replay(monitor, checksByMonitor.get(monitor.id) ?? [])]),
+  );
+
   let currentUser: SessionUser | null = DEMO_USER;
   const listeners = new Set<(user: SessionUser | null) => void>();
 
@@ -329,6 +424,7 @@ export function createMockDataSource(): DataSource {
     monitor.expectedStatusCode = values.expectedStatusCode;
     monitor.intervalSeconds = values.intervalSeconds;
     monitor.timeoutMs = values.timeoutMs;
+    monitor.failureThreshold = values.failureThreshold;
     monitor.isEnabled = values.isEnabled;
   }
 
@@ -361,7 +457,12 @@ export function createMockDataSource(): DataSource {
 
     async loadDashboard(): Promise<DashboardData> {
       const overviews = monitors.map((monitor) =>
-        buildOverview(monitor, checksByMonitor.get(monitor.id) ?? [], now),
+        buildOverview(
+          monitor,
+          checksByMonitor.get(monitor.id) ?? [],
+          replayByMonitor.get(monitor.id) ?? EMPTY_REPLAY,
+          now,
+        ),
       );
 
       // 本番と同じ並び（異常なものを上に、その中では名前順）。
@@ -385,6 +486,16 @@ export function createMockDataSource(): DataSource {
       return checks.slice(-limit).reverse();
     },
 
+    async loadIncidents({ monitorId, limit }) {
+      const all = monitorId
+        ? (replayByMonitor.get(monitorId)?.incidents ?? [])
+        : monitors.flatMap((monitor) => replayByMonitor.get(monitor.id)?.incidents ?? []);
+
+      return [...all]
+        .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))
+        .slice(0, limit);
+    },
+
     async createMonitor(input) {
       const values = normalizeMonitorValues(input);
 
@@ -401,7 +512,7 @@ export function createMockDataSource(): DataSource {
         intervalSeconds: values.intervalSeconds,
         timeoutMs: values.timeoutMs,
         isEnabled: values.isEnabled,
-        failureThreshold: 1,
+        failureThreshold: values.failureThreshold,
         baseResponseMs: 120,
         incidents: [],
         createdAtMs: Date.now(),
@@ -410,6 +521,7 @@ export function createMockDataSource(): DataSource {
       monitors.push(monitor);
       // 登録直後はまだ一度もチェックされていない（画面上は「未チェック」になる）。
       checksByMonitor.set(monitor.id, []);
+      replayByMonitor.set(monitor.id, EMPTY_REPLAY);
     },
 
     async updateMonitor(monitorId, values) {
@@ -420,6 +532,7 @@ export function createMockDataSource(): DataSource {
       const index = monitors.findIndex((monitor) => monitor.id === monitorId);
       if (index >= 0) monitors.splice(index, 1);
       checksByMonitor.delete(monitorId);
+      replayByMonitor.delete(monitorId);
     },
   };
 }

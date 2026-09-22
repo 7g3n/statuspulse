@@ -4,7 +4,12 @@
  * 認可はここには書かない。どの行が見えるかは RLS が決める（supabase/migrations/…_rls.sql）。
  * このファイルは「何を取りに行くか」だけを持ち、「取ってよいか」は持たない。
  */
-import type { CheckRow, MonitorFormValues, MonitorOverviewRow } from '@statuspulse/core';
+import type {
+  CheckRow,
+  IncidentOverviewRow,
+  MonitorFormValues,
+  MonitorOverviewRow,
+} from '@statuspulse/core';
 import { normalizeMonitorValues, parseAppError } from '@statuspulse/core';
 import type { PostgrestError } from '@supabase/supabase-js';
 
@@ -44,6 +49,7 @@ function toMonitorColumns(input: MonitorFormValues) {
     expected_status_code: values.expectedStatusCode,
     interval_seconds: values.intervalSeconds,
     timeout_ms: values.timeoutMs,
+    failure_threshold: values.failureThreshold,
     is_enabled: values.isEnabled,
   };
 }
@@ -123,6 +129,22 @@ export function createSupabaseDataSource(): DataSource {
 
       if (error) throw toError(error, 'チェック履歴の取得');
       return (data ?? []) as CheckRow[];
+    },
+
+    async loadIncidents({ monitorId, limit }) {
+      let query = supabase
+        .from('incident_overview')
+        .select('*')
+        // 継続中（ended_at が null）も started_at の新しい順に混ざる。
+        // 「今起きていること」と「直前に起きたこと」を同じ並びで読めるようにするため。
+        .order('started_at', { ascending: false })
+        .limit(limit);
+
+      if (monitorId) query = query.eq('monitor_id', monitorId);
+
+      const { data, error } = await query;
+      if (error) throw toError(error, 'ダウンタイム履歴の取得');
+      return (data ?? []) as IncidentOverviewRow[];
     },
 
     async createMonitor(values) {
