@@ -20,9 +20,13 @@
 import type {
   CheckRow,
   IncidentOverviewRow,
+  MemberRole,
   MonitorFormValues,
+  MonitorMemberDetail,
   MonitorOverviewRow,
+  PublicStatus,
   RecentCheckRow,
+  StatusPageRow,
 } from '@statuspulse/core';
 
 import { isMockMode } from './env';
@@ -67,6 +71,23 @@ export type DataSource = {
   createMonitor(values: MonitorFormValues): Promise<void>;
   updateMonitor(monitorId: string, values: MonitorFormValues): Promise<void>;
   deleteMonitor(monitorId: string): Promise<void>;
+
+  /* --- 共有（Phase 3） --- */
+  loadMembers(monitorId: string): Promise<MonitorMemberDetail[]>;
+  addMember(monitorId: string, email: string, role: MemberRole): Promise<void>;
+  setMemberRole(monitorId: string, userId: string, role: MemberRole): Promise<void>;
+  removeMember(monitorId: string, userId: string): Promise<void>;
+
+  /* --- 公開ステータスページ（Phase 3） --- */
+  publishStatusPage(monitorId: string, title: string, description: string): Promise<StatusPageRow>;
+  rotateStatusPageSlug(monitorId: string): Promise<StatusPageRow>;
+  setStatusPagePublished(monitorId: string, isPublished: boolean): Promise<StatusPageRow>;
+
+  /**
+   * 公開ページの内容。**認証していなくても呼べる唯一の取得**。
+   * slug が無効でも公開停止中でも null を返す（区別しない）。
+   */
+  loadPublicStatus(slug: string): Promise<PublicStatus | null>;
 };
 
 export const dataSource: DataSource = isMockMode

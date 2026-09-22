@@ -10,4 +10,7 @@ export const queryKeys = {
   monitorChecks: (id: string) => ['monitor', id, 'checks'] as const,
   /** 監視対象を絞らない一覧は 'all'。キーの形を揃えて無効化を1か所で書けるようにする。 */
   incidents: (monitorId: string | undefined) => ['incidents', monitorId ?? 'all'] as const,
+  members: (monitorId: string) => ['monitor', monitorId, 'members'] as const,
+  /** 公開ページ。認証前でも使うのでユーザーに紐づけない。 */
+  publicStatus: (slug: string) => ['public-status', slug] as const,
 } as const;

@@ -347,11 +347,114 @@ Phase 1 と同じ方針。`incidents` と `notifications` はどちらも `authe
 
 ---
 
-## Phase 3 以降で追加する予定のもの
+## Phase 3 で追加したもの
 
-| 追加するもの               | 何のために                                      |
-| -------------------------- | ----------------------------------------------- |
-| `status_pages` テーブル    | 公開ステータスページの発行（認証不要の SELECT） |
-| `monitor_members` テーブル | チームでの共有。`monitors` の RLS を張り替える  |
-| `incidents.postmortem`     | 障害へのメモ（Phase 4）                         |
-| SSL 証明書の期限           | `monitors` に検査結果を持つ列を足す（Phase 4）  |
+### monitor_members
+
+誰がどの監視対象を見られるか。
+
+| 列           | 型          | 備考                          |
+| ------------ | ----------- | ----------------------------- |
+| `monitor_id` | uuid        | 主キーの一部                  |
+| `user_id`    | uuid        | 主キーの一部                  |
+| `role`       | member_role | `owner` / `editor` / `viewer` |
+| `invited_by` | uuid NULL   | 誰が追加したか                |
+
+`monitors` に INSERT が入ると、トリガ `add_owner_membership()` が owner の行を作る。アプリ側で2回 INSERT する形にすると、片方だけ成功した監視対象が生まれうる。
+
+既存の監視対象には、この migration の中で owner の行を backfill している。これを忘れると、適用直後に全員が自分の監視対象を見られなくなる。
+
+`profiles.role`（`owner` / `member`）とは別の軸。あちらはアカウント全体の役割で、こちらは「この監視対象に対する」役割。
+
+### status_pages
+
+公開ステータスページ。監視対象ごとに1枚（`monitor_id` に UNIQUE）。
+
+| 列             | 型          | 備考                                         |
+| -------------- | ----------- | -------------------------------------------- |
+| `slug`         | text UNIQUE | URL に載る22文字。約111ビット                |
+| `title`        | text        | 公開ページに出す名前（内部名とは別にできる） |
+| `description`  | text        | 200文字まで                                  |
+| `is_published` | boolean     | 取り消しは行の削除ではなくフラグで           |
+
+**URL に `monitors.id` を使わない**理由は [`decisions.md`](./decisions.md) の判断 25。要点は「取り消せない」こと。
+
+公開停止（`is_published = false`）と URL の再発行（`rotate_status_page_slug()`）は別の操作にしてある。止めるだけでは、再開したときに同じ URL が生き返る。
+
+### 役割の判定（RLS の再帰を断つ）
+
+```sql
+create function can_view_monitor(p_monitor_id uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from monitor_members mm
+    where mm.monitor_id = p_monitor_id and mm.user_id = auth.uid()
+  );
+$$;
+```
+
+`monitors` のポリシーが `monitor_members` を参照し、`monitor_members` のポリシーが `monitors` を参照すると、評価が互いを呼び合って無限再帰する（42P17）。SECURITY DEFINER 関数は RLS を通過するので、この輪を断てる。
+
+同じ形で `can_edit_monitor()`（owner / editor）、`is_monitor_owner()`、`current_member_role()` がある。
+
+**引数は監視対象だけで、ユーザーは常に `auth.uid()` を見る。** 任意のユーザーの役割を返す形にすると、RLS を迂回して他人の権限を調べる道具になる。
+
+### RLS の張り替え
+
+| テーブル         | Phase 1–2               | Phase 3                        |
+| ---------------- | ----------------------- | ------------------------------ |
+| `monitors` 参照  | `owner_id = auth.uid()` | `can_view_monitor(id)`         |
+| `monitors` 更新  | `owner_id = auth.uid()` | `can_edit_monitor(id)`         |
+| `monitors` 削除  | `owner_id = auth.uid()` | `is_monitor_owner(id)`         |
+| `checks` 参照    | 所有者の監視対象        | `can_view_monitor(monitor_id)` |
+| `incidents` 参照 | 所有者の監視対象        | `can_view_monitor(monitor_id)` |
+
+作成（INSERT）だけは `owner_id = auth.uid()` のまま。その時点ではまだ `monitor_members` の行が無い。
+
+`monitor_members` と `status_pages` は `authenticated` に **SELECT のみ**。変更はすべて SECURITY DEFINER 関数を通る。
+
+### public_status(slug, check_limit)
+
+**`anon` に開いている唯一の関数。テーブルは1枚も開いていない。**
+
+返すのは「今動いているか」「どれだけ止まっていたか」「いつ止まっていたか」と応答時間だけ。監視先の URL、`error_message`、`status_code`、内部名、メンバー情報は返さない（判断 26）。
+
+見つからない slug と公開停止中を区別せず、どちらも `null` を返す。区別すると「その slug は存在する」ことを教えてしまう。
+
+### そのほかの RPC（すべて authenticated 限定）
+
+| 関数                          | できる人    | 用途                             |
+| ----------------------------- | ----------- | -------------------------------- |
+| `publish_status_page()`       | owner       | 発行（再発行時はタイトルも更新） |
+| `rotate_status_page_slug()`   | owner       | URL の作り直し                   |
+| `set_status_page_published()` | owner       | 公開・停止の切り替え             |
+| `monitor_members_of()`        | メンバー    | メンバー一覧（メールを含む）     |
+| `add_monitor_member()`        | owner       | メールでメンバーを追加           |
+| `set_monitor_member_role()`   | owner       | 役割の変更                       |
+| `remove_monitor_member()`     | owner／自分 | メンバーを外す                   |
+
+権限が無い場合は「権限がありません」ではなく `MONITOR_NOT_FOUND` を返す。存在の有無そのものを、権限のない相手に教えない。
+
+`assert_not_last_owner()` が、最後の owner の降格・削除を DB 側で拒否する。owner がいない監視対象は、共有設定も削除も誰にもできない状態になる。
+
+### monitor_overview の拡張
+
+| 列                      | 内容                                     |
+| ----------------------- | ---------------------------------------- |
+| `viewer_role`           | 呼び出したユーザーのこの対象に対する役割 |
+| `member_count`          | メンバー数                               |
+| `status_page_slug`      | 公開ページの slug（未発行なら NULL）     |
+| `status_page_published` | 公開中か                                 |
+
+`viewer_role` をビューに含められるのは、`current_member_role()` が `auth.uid()` を見る SECURITY DEFINER 関数だから。画面はこれを見て押せないボタンを描かない（防御は RLS 側）。
+
+---
+
+## Phase 4 以降で追加する予定のもの
+
+| 追加するもの                   | 何のために                                        |
+| ------------------------------ | ------------------------------------------------- |
+| `incidents.postmortem`         | 障害へのメモ。公開ページにも出せるようにする      |
+| SSL 証明書の期限               | `monitors` に検査結果を持つ列を足す               |
+| レスポンス本文の文字列チェック | `monitors.expected_body` と照合結果               |
+| 招待トークン                   | 未登録のユーザーも招待できるようにする（判断 30） |

@@ -1,6 +1,8 @@
 import {
+  canEditMonitor,
   CHECK_ERROR_KIND_LABELS,
   CHECK_INTERVAL_LABELS,
+  MEMBER_ROLE_LABELS,
   checkCoverage,
   displayUrl,
   formatResponseTime,
@@ -113,6 +115,14 @@ function MonitorRow({
         </Link>
         <p className="mt-0.5 truncate text-xs text-slate-500" title={monitor.url}>
           {monitor.method} {displayUrl(monitor.url)}
+          {monitor.member_count > 1 && (
+            <span className="ml-1.5 text-slate-400">· {monitor.member_count}人で共有</span>
+          )}
+          {monitor.status_page_published && (
+            <span className="ml-1.5 text-brand-700" title="公開ステータスページを発行しています">
+              · 公開中
+            </span>
+          )}
         </p>
 
         {/* 落ちている対象は、理由をその場に出す。詳細を開かないと分からないのでは遅い。 */}
@@ -156,9 +166,16 @@ function MonitorRow({
       </td>
 
       <td className="whitespace-nowrap py-3 pl-3 pr-4 text-right">
-        <Button size="sm" variant="ghost" onClick={onEdit}>
-          編集
-        </Button>
+        {canEditMonitor(monitor.viewer_role) ? (
+          <Button size="sm" variant="ghost" onClick={onEdit}>
+            編集
+          </Button>
+        ) : (
+          // 押せないボタンを描くより、なぜ操作できないのかを出す方が分かる。
+          <span className="text-xs text-slate-400">
+            {monitor.viewer_role ? MEMBER_ROLE_LABELS[monitor.viewer_role] : '—'}
+          </span>
+        )}
       </td>
     </tr>
   );

@@ -161,6 +161,53 @@ export type Database = {
         ];
       };
 
+      monitor_members: {
+        Row: {
+          monitor_id: string;
+          user_id: string;
+          role: Database['public']['Enums']['member_role'];
+          invited_by: string | null;
+          created_at: string;
+        };
+        /** 追加・変更・削除はすべて RPC 経由（add_monitor_member 他）。 */
+        Insert: Record<string, never>;
+        Update: Record<string, never>;
+        Relationships: [
+          {
+            foreignKeyName: 'monitor_members_monitor_id_fkey';
+            columns: ['monitor_id'];
+            isOneToOne: false;
+            referencedRelation: 'monitors';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+
+      status_pages: {
+        Row: {
+          id: string;
+          monitor_id: string;
+          slug: string;
+          title: string;
+          description: string;
+          is_published: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        /** 発行・再発行・公開切替はすべて RPC 経由。 */
+        Insert: Record<string, never>;
+        Update: Record<string, never>;
+        Relationships: [
+          {
+            foreignKeyName: 'status_pages_monitor_id_fkey';
+            columns: ['monitor_id'];
+            isOneToOne: true;
+            referencedRelation: 'monitors';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+
       notifications: {
         Row: {
           id: number;
@@ -224,6 +271,11 @@ export type Database = {
           last_response_time_ms: number | null;
           last_error_kind: Database['public']['Enums']['check_error_kind'] | null;
           last_error_message: string | null;
+          /** 呼び出したユーザーのこの監視対象に対する役割。メンバーでなければ null。 */
+          viewer_role: Database['public']['Enums']['member_role'] | null;
+          member_count: number;
+          status_page_slug: string | null;
+          status_page_published: boolean;
         };
         Relationships: [];
       };
@@ -308,6 +360,62 @@ export type Database = {
         Returns: undefined;
       };
 
+      /** 認証不要で呼べる唯一の関数。slug を知らなければ null が返る。 */
+      public_status: {
+        Args: { p_slug: string; p_check_limit?: number };
+        Returns: Json;
+      };
+
+      publish_status_page: {
+        Args: { p_monitor_id: string; p_title?: string | null; p_description?: string };
+        Returns: Database['public']['Tables']['status_pages']['Row'];
+      };
+
+      rotate_status_page_slug: {
+        Args: { p_monitor_id: string };
+        Returns: Database['public']['Tables']['status_pages']['Row'];
+      };
+
+      set_status_page_published: {
+        Args: { p_monitor_id: string; p_is_published: boolean };
+        Returns: Database['public']['Tables']['status_pages']['Row'];
+      };
+
+      monitor_members_of: {
+        Args: { p_monitor_id: string };
+        Returns: {
+          user_id: string;
+          email: string;
+          display_name: string;
+          role: Database['public']['Enums']['member_role'];
+          created_at: string;
+          is_self: boolean;
+        }[];
+      };
+
+      add_monitor_member: {
+        Args: {
+          p_monitor_id: string;
+          p_email: string;
+          p_role?: Database['public']['Enums']['member_role'];
+        };
+        Returns: Database['public']['Tables']['monitor_members']['Row'];
+      };
+
+      set_monitor_member_role: {
+        Args: {
+          p_monitor_id: string;
+          p_user_id: string;
+          p_role: Database['public']['Enums']['member_role'];
+        };
+        Returns: Database['public']['Tables']['monitor_members']['Row'];
+      };
+
+      remove_monitor_member: {
+        Args: { p_monitor_id: string; p_user_id: string };
+        Returns: undefined;
+      };
+
       /** 画面から呼ぶ。SECURITY INVOKER なので RLS がそのまま効く。 */
       recent_checks: {
         Args: { p_limit?: number };
@@ -330,6 +438,7 @@ export type Database = {
       http_method: 'GET' | 'HEAD';
       notification_kind: 'monitor_down' | 'monitor_recovered';
       notification_status: 'pending' | 'sent' | 'failed' | 'skipped';
+      member_role: 'owner' | 'editor' | 'viewer';
     };
 
     CompositeTypes: Record<string, never>;
@@ -349,6 +458,10 @@ export type MonitorOverviewRow = Database['public']['Views']['monitor_overview']
 export type IncidentRow = Database['public']['Tables']['incidents']['Row'];
 export type IncidentOverviewRow = Database['public']['Views']['incident_overview']['Row'];
 export type NotificationRow = Database['public']['Tables']['notifications']['Row'];
+export type MonitorMemberRow = Database['public']['Tables']['monitor_members']['Row'];
+export type StatusPageRow = Database['public']['Tables']['status_pages']['Row'];
+export type MonitorMemberDetail =
+  Database['public']['Functions']['monitor_members_of']['Returns'][number];
 export type RecentCheckRow = Database['public']['Functions']['recent_checks']['Returns'][number];
 export type DueMonitorRow = Database['public']['Functions']['due_monitors']['Returns'][number];
 

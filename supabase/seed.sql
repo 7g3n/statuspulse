@@ -350,3 +350,69 @@ select
 from incidents i
 join monitors m on m.id = i.monitor_id
 where i.ended_at is not null;
+
+-- -----------------------------------------------------------------------------
+-- チーム機能の確認用に、2人目のユーザーを作る（Phase 3）
+--
+-- ログイン: teammate@statuspulse.test / demo-password
+-- StockDesk（本番）に viewer として参加している状態にしてある。
+-- 「共有された側には何が見えて、何が押せないか」を確かめるため。
+-- -----------------------------------------------------------------------------
+insert into auth.users (
+  instance_id, id, aud, role, email, encrypted_password,
+  email_confirmed_at, created_at, updated_at,
+  raw_app_meta_data, raw_user_meta_data,
+  confirmation_token, recovery_token, email_change, email_change_token_new, email_change_token_current
+) values (
+  '00000000-0000-0000-0000-000000000000',
+  '00000000-0000-0000-0000-0000000000a2',
+  'authenticated',
+  'authenticated',
+  'teammate@statuspulse.test',
+  crypt('demo-password', gen_salt('bf')),
+  now(), now() - interval '20 days', now(),
+  '{"provider":"email","providers":["email"]}',
+  '{"display_name":"同僚"}',
+  '', '', '', '', ''
+);
+
+insert into auth.identities (
+  provider_id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
+) values (
+  '00000000-0000-0000-0000-0000000000a2',
+  '00000000-0000-0000-0000-0000000000a2',
+  '{"sub":"00000000-0000-0000-0000-0000000000a2","email":"teammate@statuspulse.test","email_verified":true}',
+  'email',
+  now(), now() - interval '20 days', now()
+);
+
+insert into monitor_members (monitor_id, user_id, role, invited_by)
+values
+  (
+    '00000000-0000-0000-0000-0000000000b1',
+    '00000000-0000-0000-0000-0000000000a2',
+    'viewer',
+    '00000000-0000-0000-0000-0000000000a1'
+  ),
+  (
+    '00000000-0000-0000-0000-0000000000b2',
+    '00000000-0000-0000-0000-0000000000a2',
+    'editor',
+    '00000000-0000-0000-0000-0000000000a1'
+  );
+
+-- -----------------------------------------------------------------------------
+-- 公開ステータスページ（Phase 3）
+--
+-- slug は乱数なので、シードでは固定値を入れている。
+-- 開発中に URL が毎回変わると、ブックマークも貼ったリンクも使えなくなるため。
+-- 本番では publish_status_page() が generate_status_page_slug() で作る。
+-- -----------------------------------------------------------------------------
+insert into status_pages (monitor_id, slug, title, description, is_published)
+values (
+  '00000000-0000-0000-0000-0000000000b1',
+  'demo-stockdesk-status',
+  'StockDesk',
+  '受注・在庫の管理画面です。障害情報はこのページで随時更新します。',
+  true
+);

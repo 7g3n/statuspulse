@@ -8,7 +8,10 @@ import type {
   CheckRow,
   IncidentOverviewRow,
   MonitorFormValues,
+  MonitorMemberDetail,
   MonitorOverviewRow,
+  PublicStatus,
+  StatusPageRow,
 } from '@statuspulse/core';
 import { normalizeMonitorValues, parseAppError } from '@statuspulse/core';
 import type { PostgrestError } from '@supabase/supabase-js';
@@ -182,6 +185,88 @@ export function createSupabaseDataSource(): DataSource {
     async deleteMonitor(monitorId) {
       const { error } = await supabase.from('monitors').delete().eq('id', monitorId);
       if (error) throw toError(error, '監視対象の削除');
+    },
+
+    /* ---------------------------------------------------------------- */
+    /* 共有                                                              */
+    /* ---------------------------------------------------------------- */
+
+    async loadMembers(monitorId) {
+      // auth.users はブラウザから読めないので、メールを返す関数を経由する。
+      const { data, error } = await supabase.rpc('monitor_members_of', {
+        p_monitor_id: monitorId,
+      });
+      if (error) throw toError(error, 'メンバーの取得');
+      return (data ?? []) as MonitorMemberDetail[];
+    },
+
+    async addMember(monitorId, email, role) {
+      const { error } = await supabase.rpc('add_monitor_member', {
+        p_monitor_id: monitorId,
+        p_email: email,
+        p_role: role,
+      });
+      if (error) throw toError(error, 'メンバーの追加');
+    },
+
+    async setMemberRole(monitorId, userId, role) {
+      const { error } = await supabase.rpc('set_monitor_member_role', {
+        p_monitor_id: monitorId,
+        p_user_id: userId,
+        p_role: role,
+      });
+      if (error) throw toError(error, '役割の変更');
+    },
+
+    async removeMember(monitorId, userId) {
+      const { error } = await supabase.rpc('remove_monitor_member', {
+        p_monitor_id: monitorId,
+        p_user_id: userId,
+      });
+      if (error) throw toError(error, 'メンバーの削除');
+    },
+
+    /* ---------------------------------------------------------------- */
+    /* 公開ステータスページ                                              */
+    /* ---------------------------------------------------------------- */
+
+    async publishStatusPage(monitorId, title, description) {
+      const { data, error } = await supabase.rpc('publish_status_page', {
+        p_monitor_id: monitorId,
+        p_title: title,
+        p_description: description,
+      });
+      if (error) throw toError(error, '公開ページの発行');
+      return data as StatusPageRow;
+    },
+
+    async rotateStatusPageSlug(monitorId) {
+      const { data, error } = await supabase.rpc('rotate_status_page_slug', {
+        p_monitor_id: monitorId,
+      });
+      if (error) throw toError(error, 'URL の再発行');
+      return data as StatusPageRow;
+    },
+
+    async setStatusPagePublished(monitorId, isPublished) {
+      const { data, error } = await supabase.rpc('set_status_page_published', {
+        p_monitor_id: monitorId,
+        p_is_published: isPublished,
+      });
+      if (error) throw toError(error, '公開設定の変更');
+      return data as StatusPageRow;
+    },
+
+    /**
+     * 公開ページ。anon キーのまま呼ぶ。
+     *
+     * この経路だけはテーブルに一切触らない。public_status() が
+     * anon に開かれている唯一の関数で、slug を知らなければ何も返らない。
+     */
+    async loadPublicStatus(slug) {
+      const { data, error } = await supabase.rpc('public_status', { p_slug: slug });
+      if (error) throw toError(error, 'ステータスの取得');
+      return (data as PublicStatus | null) ?? null;
     },
   };
 }

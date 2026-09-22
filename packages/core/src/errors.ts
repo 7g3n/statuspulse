@@ -11,6 +11,11 @@ export const APP_ERROR_CODES = [
   'MONITOR_NOT_FOUND',
   'INVALID_MONITOR_URL',
   'INVALID_INTERVAL',
+  // Phase 3
+  'USER_NOT_FOUND',
+  'MEMBER_NOT_FOUND',
+  'LAST_OWNER',
+  'STATUS_PAGE_NOT_FOUND',
 ] as const;
 
 export type AppErrorCode = (typeof APP_ERROR_CODES)[number];

@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
 import { AppShell } from '@/components/AppShell';
@@ -8,6 +9,7 @@ import { SessionProvider, useSession } from '@/features/auth/session';
 import { DashboardPage } from '@/features/dashboard/DashboardPage';
 import { IncidentsPage } from '@/features/incidents/IncidentsPage';
 import { MonitorDetailPage } from '@/features/monitors/MonitorDetailPage';
+import { PublicStatusPage } from '@/features/status/PublicStatusPage';
 import { isMockMode, isSupabaseConfigured } from '@/lib/env';
 
 import { SetupNotice } from './SetupNotice';
@@ -24,7 +26,15 @@ const queryClient = new QueryClient({
   },
 });
 
-function AuthenticatedApp() {
+/**
+ * 認証の内側であることを保証する。
+ *
+ * Phase 3 で公開ステータスページ（`/status/:slug`）が増え、
+ * 「認証の内側だけで動くアプリ」ではなくなった。
+ * どの画面が認証を要求するかをルート定義の側で見えるようにするため、
+ * 画面全体を包むのではなくルートごとに包む形にしてある。
+ */
+function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading } = useSession();
 
   // セッションの確認中にログイン画面を出すと、リロードのたびに一瞬ログイン画面が見える。
@@ -38,16 +48,7 @@ function AuthenticatedApp() {
 
   if (!user) return <LoginPage />;
 
-  return (
-    <AppShell>
-      <Routes>
-        <Route path="/" element={<DashboardPage />} />
-        <Route path="/incidents" element={<IncidentsPage />} />
-        <Route path="/monitors/:monitorId" element={<MonitorDetailPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </AppShell>
-  );
+  return <AppShell>{children}</AppShell>;
 }
 
 export function App() {
@@ -58,7 +59,37 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <SessionProvider>
-          <AuthenticatedApp />
+          <Routes>
+            {/* 認証の外側。anon キーのまま public_status() だけを呼ぶ。 */}
+            <Route path="/status/:slug" element={<PublicStatusPage />} />
+
+            <Route
+              path="/"
+              element={
+                <RequireAuth>
+                  <DashboardPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/incidents"
+              element={
+                <RequireAuth>
+                  <IncidentsPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/monitors/:monitorId"
+              element={
+                <RequireAuth>
+                  <MonitorDetailPage />
+                </RequireAuth>
+              }
+            />
+
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
         </SessionProvider>
       </BrowserRouter>
     </QueryClientProvider>

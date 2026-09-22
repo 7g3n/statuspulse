@@ -1,7 +1,10 @@
 import {
+  canEditMonitor,
+  canManageMonitor,
   CHECK_ERROR_KIND_LABELS,
   CHECK_INTERVAL_LABELS,
   detectionDelaySeconds,
+  MEMBER_ROLE_LABELS,
   displayUrl,
   formatDowntime,
   formatResponseTime,
@@ -18,6 +21,7 @@ import { Button, Card, EmptyBlock, ErrorBlock, LoadingBlock, PageHeader } from '
 import { useDashboard } from '@/features/dashboard/api';
 import { useIncidents } from '@/features/incidents/api';
 import { IncidentTimeline } from '@/features/incidents/IncidentTimeline';
+import { SharingCard } from '@/features/sharing/SharingCard';
 import { formatDateTime, formatDuration } from '@/lib/format';
 
 import { MonitorFormDialog } from './MonitorFormDialog';
@@ -90,6 +94,8 @@ export function MonitorDetailPage() {
     : `${monitor.interval_seconds}秒`;
 
   const detectionDelay = detectionDelaySeconds(monitor.interval_seconds, monitor.failure_threshold);
+  const canEdit = canEditMonitor(monitor.viewer_role);
+  const canManage = canManageMonitor(monitor.viewer_role);
 
   async function onDelete() {
     await deleteMonitor.mutateAsync(monitorId);
@@ -106,13 +112,18 @@ export function MonitorDetailPage() {
 
       <PageHeader
         title={monitor.name}
-        description={`${monitor.method} ${displayUrl(monitor.url)}`}
+        description={`${monitor.method} ${displayUrl(monitor.url)}　/　あなたの役割: ${
+          monitor.viewer_role ? MEMBER_ROLE_LABELS[monitor.viewer_role] : '—'
+        }`}
         actions={
           <>
-            <Button onClick={() => setEditOpen(true)}>編集</Button>
-            <Button variant="danger" onClick={() => setConfirmingDelete(true)}>
-              削除
-            </Button>
+            {/* 押せないボタンを描かないのは体験のため。防御は RLS 側にある。 */}
+            {canEdit && <Button onClick={() => setEditOpen(true)}>編集</Button>}
+            {canManage && (
+              <Button variant="danger" onClick={() => setConfirmingDelete(true)}>
+                削除
+              </Button>
+            )}
           </>
         }
       />
@@ -210,6 +221,8 @@ export function MonitorDetailPage() {
           )}
         </div>
       </Card>
+
+      <SharingCard monitor={monitor} />
 
       <Card className="overflow-hidden">
         <div className="flex items-baseline justify-between px-4 py-3">

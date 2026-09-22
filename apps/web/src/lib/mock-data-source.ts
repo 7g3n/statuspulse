@@ -21,10 +21,14 @@ import type {
   CheckRow,
   HttpMethod,
   IncidentOverviewRow,
+  MemberRole,
   MonitorFormValues,
+  MonitorMemberDetail,
   MonitorOverviewRow,
   MonitorState,
+  PublicStatus,
   RecentCheckRow,
+  StatusPageRow,
 } from '@statuspulse/core';
 import {
   incidentDurationSeconds,
@@ -40,6 +44,13 @@ const DEMO_USER: SessionUser = {
   id: '00000000-0000-0000-0000-0000000000a1',
   email: 'demo@statuspulse.test',
   displayName: 'デモユーザー',
+};
+
+/** チーム機能の見え方を確かめるための2人目（seed.sql と同じ顔ぶれ）。 */
+const TEAMMATE = {
+  id: '00000000-0000-0000-0000-0000000000a2',
+  email: 'teammate@statuspulse.test',
+  displayName: '同僚',
 };
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -65,6 +76,21 @@ type Incident = {
   message: string;
 };
 
+type MockMember = {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: MemberRole;
+  createdAt: string;
+};
+
+type MockStatusPage = {
+  slug: string;
+  title: string;
+  description: string;
+  isPublished: boolean;
+};
+
 type MockMonitor = {
   id: string;
   name: string;
@@ -78,11 +104,29 @@ type MockMonitor = {
   baseResponseMs: number;
   incidents: Incident[];
   createdAtMs: number;
+  members: MockMember[];
+  statusPage: MockStatusPage | null;
 };
 
 /** seed.sql と同じ顔ぶれ。1つ目は StockDesk のデプロイ先（差し替え前提のプレースホルダ）。 */
 function initialMonitors(now: number): MockMonitor[] {
   const createdAtMs = now - 30 * 24 * HOUR_MS;
+  const createdAt = new Date(createdAtMs).toISOString();
+
+  const ownerOnly = (): MockMember[] => [
+    {
+      userId: DEMO_USER.id,
+      email: DEMO_USER.email,
+      displayName: DEMO_USER.displayName,
+      role: 'owner',
+      createdAt,
+    },
+  ];
+
+  const withTeammate = (role: MemberRole): MockMember[] => [
+    ...ownerOnly(),
+    { ...TEAMMATE, userId: TEAMMATE.id, role, createdAt },
+  ];
 
   return [
     {
@@ -100,6 +144,13 @@ function initialMonitors(now: number): MockMonitor[] {
       failureThreshold: 3,
       baseResponseMs: 180,
       createdAtMs,
+      members: withTeammate('viewer'),
+      statusPage: {
+        slug: 'demo-stockdesk-status',
+        title: 'StockDesk',
+        description: '受注・在庫の管理画面です。障害情報はこのページで随時更新します。',
+        isPublished: true,
+      },
       incidents: [
         {
           startsAgoMs: 5 * 24 * HOUR_MS + 2 * HOUR_MS,
@@ -129,6 +180,8 @@ function initialMonitors(now: number): MockMonitor[] {
       failureThreshold: 2,
       baseResponseMs: 90,
       createdAtMs,
+      members: withTeammate('editor'),
+      statusPage: null,
       incidents: [
         {
           startsAgoMs: 5 * 24 * HOUR_MS + 2 * HOUR_MS,
@@ -151,6 +204,8 @@ function initialMonitors(now: number): MockMonitor[] {
       failureThreshold: 2,
       baseResponseMs: 45,
       createdAtMs,
+      members: ownerOnly(),
+      statusPage: null,
       // 障害なし。稼働率 100% の見え方を確かめるため。
       incidents: [],
     },
@@ -166,6 +221,8 @@ function initialMonitors(now: number): MockMonitor[] {
       failureThreshold: 2,
       baseResponseMs: 60,
       createdAtMs,
+      members: ownerOnly(),
+      statusPage: null,
       incidents: [
         // 現在も継続中の障害（終了時刻を未来に置く）。
         {
@@ -189,6 +246,8 @@ function initialMonitors(now: number): MockMonitor[] {
       failureThreshold: 2,
       baseResponseMs: 210,
       createdAtMs,
+      members: ownerOnly(),
+      statusPage: null,
       incidents: [],
     },
   ];
@@ -377,7 +436,23 @@ function buildOverview(
     last_response_time_ms: latest?.response_time_ms ?? null,
     last_error_kind: latest?.error_kind ?? null,
     last_error_message: latest?.error_message ?? null,
+
+    // モックは常にデモユーザーとしてログインしている前提。
+    viewer_role: monitor.members.find((m) => m.userId === DEMO_USER.id)?.role ?? null,
+    member_count: monitor.members.length,
+    status_page_slug: monitor.statusPage?.slug ?? null,
+    status_page_published: monitor.statusPage?.isPublished ?? false,
   };
+}
+
+/** 乱数の代わりに時刻から作る。本番は DB の generate_status_page_slug()。 */
+function mockSlug(): string {
+  const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
+  let result = '';
+  for (let i = 0; i < 22; i += 1) {
+    result += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return result;
 }
 
 function toRecentCheck(check: CheckRow): RecentCheckRow {
@@ -414,6 +489,34 @@ export function createMockDataSource(): DataSource {
     const monitor = monitors.find((item) => item.id === monitorId);
     if (!monitor) throw new Error('監視対象が見つかりません');
     return monitor;
+  }
+
+  function toStatusPageRow(monitor: MockMonitor): StatusPageRow {
+    const page = monitor.statusPage;
+    if (!page) throw new Error('公開ページが発行されていません');
+    return {
+      id: `${monitor.id}-page`,
+      monitor_id: monitor.id,
+      slug: page.slug,
+      title: page.title,
+      description: page.description,
+      is_published: page.isPublished,
+      created_at: new Date(monitor.createdAtMs).toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  /** 本番の assert_not_last_owner() と同じ規則。操作できなくなる状態を作らせない。 */
+  function assertNotLastOwner(
+    monitor: MockMonitor,
+    userId: string,
+    nextRole: MemberRole | null,
+  ): void {
+    const target = monitor.members.find((member) => member.userId === userId);
+    if (target?.role !== 'owner' || nextRole === 'owner') return;
+    if (monitor.members.filter((member) => member.role === 'owner').length <= 1) {
+      throw new Error('最後の所有者は変更・削除できません');
+    }
   }
 
   function applyValues(monitor: MockMonitor, input: MonitorFormValues): void {
@@ -516,6 +619,16 @@ export function createMockDataSource(): DataSource {
         baseResponseMs: 120,
         incidents: [],
         createdAtMs: Date.now(),
+        members: [
+          {
+            userId: DEMO_USER.id,
+            email: DEMO_USER.email,
+            displayName: DEMO_USER.displayName,
+            role: 'owner',
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        statusPage: null,
       };
 
       monitors.push(monitor);
@@ -526,6 +639,129 @@ export function createMockDataSource(): DataSource {
 
     async updateMonitor(monitorId, values) {
       applyValues(findMonitor(monitorId), values);
+    },
+
+    async loadMembers(monitorId) {
+      return findMonitor(monitorId).members.map((member): MonitorMemberDetail => ({
+        user_id: member.userId,
+        email: member.email,
+        display_name: member.displayName,
+        role: member.role,
+        created_at: member.createdAt,
+        is_self: member.userId === DEMO_USER.id,
+      }));
+    },
+
+    async addMember(monitorId, email, role) {
+      const monitor = findMonitor(monitorId);
+      const normalized = email.trim().toLowerCase();
+
+      // 本番は auth.users を引く。モックには登録済みユーザーが2人しかいないので、
+      // 見つからない場合は本番と同じ USER_NOT_FOUND の文言で返す。
+      const known = [DEMO_USER, TEAMMATE].find((user) => user.email.toLowerCase() === normalized);
+      if (!known) {
+        throw new Error('そのメールアドレスのユーザーは登録されていません');
+      }
+
+      const existing = monitor.members.find((member) => member.userId === known.id);
+      if (existing) existing.role = role;
+      else
+        monitor.members.push({
+          userId: known.id,
+          email: known.email,
+          displayName: known.displayName,
+          role,
+          createdAt: new Date().toISOString(),
+        });
+    },
+
+    async setMemberRole(monitorId, userId, role) {
+      const monitor = findMonitor(monitorId);
+      assertNotLastOwner(monitor, userId, role);
+      const member = monitor.members.find((item) => item.userId === userId);
+      if (member) member.role = role;
+    },
+
+    async removeMember(monitorId, userId) {
+      const monitor = findMonitor(monitorId);
+      assertNotLastOwner(monitor, userId, null);
+      monitor.members = monitor.members.filter((member) => member.userId !== userId);
+    },
+
+    async publishStatusPage(monitorId, title, description) {
+      const monitor = findMonitor(monitorId);
+      monitor.statusPage = {
+        slug: monitor.statusPage?.slug ?? mockSlug(),
+        title: title.trim() || monitor.name,
+        description,
+        isPublished: true,
+      };
+      return toStatusPageRow(monitor);
+    },
+
+    async rotateStatusPageSlug(monitorId) {
+      const monitor = findMonitor(monitorId);
+      if (!monitor.statusPage) throw new Error('公開ページが発行されていません');
+      monitor.statusPage.slug = mockSlug();
+      return toStatusPageRow(monitor);
+    },
+
+    async setStatusPagePublished(monitorId, isPublished) {
+      const monitor = findMonitor(monitorId);
+      if (!monitor.statusPage) throw new Error('公開ページが発行されていません');
+      monitor.statusPage.isPublished = isPublished;
+      return toStatusPageRow(monitor);
+    },
+
+    async loadPublicStatus(slug) {
+      const monitor = monitors.find(
+        (item) => item.statusPage?.slug === slug && item.statusPage.isPublished,
+      );
+      // 見つからない場合と公開停止中を区別しない（本番と同じ）。
+      if (!monitor?.statusPage) return null;
+
+      const checks = checksByMonitor.get(monitor.id) ?? [];
+      const replayed = replayByMonitor.get(monitor.id) ?? EMPTY_REPLAY;
+      const periods = replayed.incidents.map((incident) => ({
+        startedAt: incident.started_at,
+        endedAt: incident.ended_at,
+      }));
+      const latest = checks[checks.length - 1];
+
+      return {
+        title: monitor.statusPage.title,
+        description: monitor.statusPage.description,
+        status: replayed.state.status,
+        status_changed_at: replayed.statusChangedAt,
+        interval_seconds: monitor.intervalSeconds,
+        last_checked_at: latest?.checked_at ?? null,
+        generated_at: new Date().toISOString(),
+        uptime: {
+          day: {
+            window_seconds: 24 * 60 * 60,
+            down_seconds: totalDowntimeSeconds(periods, now - 24 * HOUR_MS, now),
+          },
+          week: {
+            window_seconds: 7 * 24 * 60 * 60,
+            down_seconds: totalDowntimeSeconds(periods, now - WEEK_MS, now),
+          },
+        },
+        // 公開ページに出すのは時刻・結果・応答時間だけ（URL もステータスコードも出さない）。
+        checks: checks.slice(-60).map((check) => ({
+          checked_at: check.checked_at,
+          result: check.result,
+          response_time_ms: check.response_time_ms,
+        })),
+        incidents: [...replayed.incidents]
+          .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))
+          .slice(0, 20)
+          .map((incident) => ({
+            started_at: incident.started_at,
+            ended_at: incident.ended_at,
+            cause: incident.cause,
+            duration_seconds: incident.duration_seconds,
+          })),
+      } satisfies PublicStatus;
     },
 
     async deleteMonitor(monitorId) {
