@@ -416,3 +416,62 @@ values (
   '受注・在庫の管理画面です。障害情報はこのページで随時更新します。',
   true
 );
+
+-- -----------------------------------------------------------------------------
+-- TLS 証明書の検査結果（Phase 4）
+--
+-- 本番では Worker が TLS ハンドシェイクを張って取得し、record_certificate() が書く。
+-- シードでは、期限の近さによる見え方の違いを確かめられるよう固定値を入れておく
+-- （チェック履歴を作っているのと同じ考え方）。
+-- -----------------------------------------------------------------------------
+update monitors set
+  certificate_expires_at = now() + interval '64 days',
+  certificate_issuer = 'Let''s Encrypt',
+  certificate_checked_at = now() - interval '3 hours'
+where id in (
+  '00000000-0000-0000-0000-0000000000b1',
+  '00000000-0000-0000-0000-0000000000b2'
+);
+
+-- 1つだけ期限が近い状態にして、色分けと通知の対象になることを見せる。
+update monitors set
+  certificate_expires_at = now() + interval '12 days',
+  certificate_issuer = 'Google Trust Services',
+  certificate_checked_at = now() - interval '3 hours'
+where id = '00000000-0000-0000-0000-0000000000b4';
+
+update monitors set
+  certificate_expires_at = now() + interval '210 days',
+  certificate_issuer = 'Google Trust Services',
+  certificate_checked_at = now() - interval '3 hours'
+where id = '00000000-0000-0000-0000-0000000000b3';
+
+-- 検証環境は証明書を監視しない設定にしておく（切り替えられることを見せるため）。
+update monitors set check_certificate = false
+where id = '00000000-0000-0000-0000-0000000000b5';
+
+-- -----------------------------------------------------------------------------
+-- レスポンス本文のチェック（Phase 4）
+--
+-- 「ステータスは 200 だが中身が壊れている」を捉える設定。
+-- API のヘルスチェックには、返ってくるべき文字列を入れておく。
+-- -----------------------------------------------------------------------------
+update monitors set expected_body_text = '"status":"ok"'
+where id = '00000000-0000-0000-0000-0000000000b2';
+
+-- -----------------------------------------------------------------------------
+-- ポストモーテム（Phase 4）
+--
+-- 最も古い障害にだけ、公開済みのメモを入れておく。
+-- 「書いてある障害」と「書いていない障害」の見え方を並べて確かめるため。
+-- -----------------------------------------------------------------------------
+update incidents i set
+  postmortem = E'デプロイしたリビジョンで、マイグレーションが未適用のままアプリが起動していました。\n'
+    || E'前段のプロキシが 502 を返す状態が 30 分続いています。\n\n'
+    || E'直前のリビジョンへ戻して復旧しました。\n'
+    || E'再発防止として、起動前にマイグレーションの適用状況を確認する手順をデプロイに追加しています。',
+  postmortem_is_public = true,
+  postmortem_updated_at = i.ended_at,
+  postmortem_updated_by = '00000000-0000-0000-0000-0000000000a1'
+where i.monitor_id = '00000000-0000-0000-0000-0000000000b1'
+  and i.ended_at is not null;

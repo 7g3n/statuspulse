@@ -106,6 +106,11 @@ type MockMonitor = {
   createdAtMs: number;
   members: MockMember[];
   statusPage: MockStatusPage | null;
+  expectedBodyText: string | null;
+  checkCertificate: boolean;
+  /** モックでは固定値。本番は Worker が TLS ハンドシェイクで取得する。 */
+  certificateExpiresAt: string | null;
+  certificateIssuer: string | null;
 };
 
 /** seed.sql と同じ顔ぶれ。1つ目は StockDesk のデプロイ先（差し替え前提のプレースホルダ）。 */
@@ -143,6 +148,10 @@ function initialMonitors(now: number): MockMonitor[] {
       // 「誤検知を減らす」設定が実際に何を落とすのかを画面で見せるため。
       failureThreshold: 3,
       baseResponseMs: 180,
+      expectedBodyText: '在庫',
+      checkCertificate: true,
+      certificateExpiresAt: new Date(now + 64 * 24 * HOUR_MS).toISOString(),
+      certificateIssuer: "Let's Encrypt",
       createdAtMs,
       members: withTeammate('viewer'),
       statusPage: {
@@ -179,6 +188,10 @@ function initialMonitors(now: number): MockMonitor[] {
       isEnabled: true,
       failureThreshold: 2,
       baseResponseMs: 90,
+      expectedBodyText: null,
+      checkCertificate: true,
+      certificateExpiresAt: new Date(now + 64 * 24 * HOUR_MS).toISOString(),
+      certificateIssuer: "Let's Encrypt",
       createdAtMs,
       members: withTeammate('editor'),
       statusPage: null,
@@ -203,6 +216,10 @@ function initialMonitors(now: number): MockMonitor[] {
       isEnabled: true,
       failureThreshold: 2,
       baseResponseMs: 45,
+      expectedBodyText: null,
+      checkCertificate: true,
+      certificateExpiresAt: new Date(now + 12 * 24 * HOUR_MS).toISOString(),
+      certificateIssuer: 'Google Trust Services',
       createdAtMs,
       members: ownerOnly(),
       statusPage: null,
@@ -220,6 +237,10 @@ function initialMonitors(now: number): MockMonitor[] {
       isEnabled: true,
       failureThreshold: 2,
       baseResponseMs: 60,
+      expectedBodyText: null,
+      checkCertificate: true,
+      certificateExpiresAt: new Date(now + 210 * 24 * HOUR_MS).toISOString(),
+      certificateIssuer: 'Google Trust Services',
       createdAtMs,
       members: ownerOnly(),
       statusPage: null,
@@ -245,6 +266,10 @@ function initialMonitors(now: number): MockMonitor[] {
       isEnabled: false,
       failureThreshold: 2,
       baseResponseMs: 210,
+      expectedBodyText: null,
+      checkCertificate: false,
+      certificateExpiresAt: null,
+      certificateIssuer: null,
       createdAtMs,
       members: ownerOnly(),
       statusPage: null,
@@ -350,6 +375,9 @@ function replay(monitor: MockMonitor, checks: readonly CheckRow[]): Replayed {
           error_message: check.error_message,
           failure_count: next.consecutiveFailures,
           duration_seconds: 0,
+          postmortem: '',
+          postmortem_is_public: false,
+          postmortem_updated_at: null,
           // モックには定期処理がいないので、送信済みとして見せる。
           down_notification_status: 'sent',
           recovered_notification_status: null,
@@ -362,6 +390,18 @@ function replay(monitor: MockMonitor, checks: readonly CheckRow[]): Replayed {
 
     if (next.status !== state.status) statusChangedAt = check.checked_at;
     state = { status: next.status, consecutiveFailures: next.consecutiveFailures };
+  }
+
+  // 最も古い障害にだけ、公開済みのポストモーテムを入れておく。
+  // 「書いてある障害」と「書いていない障害」の見え方を並べて確かめるため。
+  const oldest = incidents[0];
+  if (oldest && oldest.ended_at !== null) {
+    oldest.postmortem =
+      'デプロイしたリビジョンでマイグレーションが未適用のまま起動し、502 を返していました。\n' +
+      '直前のリビジョンへ戻して復旧しています。\n' +
+      '再発防止として、起動前にマイグレーションの適用状況を確認する手順を追加しました。';
+    oldest.postmortem_is_public = true;
+    oldest.postmortem_updated_at = oldest.ended_at;
   }
 
   for (const incident of incidents) {
@@ -442,6 +482,15 @@ function buildOverview(
     member_count: monitor.members.length,
     status_page_slug: monitor.statusPage?.slug ?? null,
     status_page_published: monitor.statusPage?.isPublished ?? false,
+
+    expected_body_text: monitor.expectedBodyText,
+    check_certificate: monitor.checkCertificate,
+    certificate_expires_at: monitor.certificateExpiresAt,
+    certificate_issuer: monitor.certificateIssuer,
+    certificate_checked_at: monitor.certificateExpiresAt
+      ? new Date(now - 3 * HOUR_MS).toISOString()
+      : null,
+    certificate_error: null,
   };
 }
 
@@ -528,6 +577,8 @@ export function createMockDataSource(): DataSource {
     monitor.intervalSeconds = values.intervalSeconds;
     monitor.timeoutMs = values.timeoutMs;
     monitor.failureThreshold = values.failureThreshold;
+    monitor.expectedBodyText = values.expectedBodyText;
+    monitor.checkCertificate = values.checkCertificate;
     monitor.isEnabled = values.isEnabled;
   }
 
@@ -599,6 +650,19 @@ export function createMockDataSource(): DataSource {
         .slice(0, limit);
     },
 
+    async setIncidentPostmortem(incidentId, text, isPublic) {
+      for (const replayed of replayByMonitor.values()) {
+        const incident = replayed.incidents.find((item) => item.id === incidentId);
+        if (!incident) continue;
+        incident.postmortem = text;
+        incident.postmortem_is_public = isPublic;
+        // 空文字にしたら「未記入」に戻す（本番の set_incident_postmortem と同じ）。
+        incident.postmortem_updated_at = text === '' ? null : new Date().toISOString();
+        return;
+      }
+      throw new Error('障害の記録が見つかりません');
+    },
+
     async createMonitor(input) {
       const values = normalizeMonitorValues(input);
 
@@ -629,6 +693,10 @@ export function createMockDataSource(): DataSource {
           },
         ],
         statusPage: null,
+        expectedBodyText: values.expectedBodyText,
+        checkCertificate: values.checkCertificate,
+        certificateExpiresAt: null,
+        certificateIssuer: null,
       };
 
       monitors.push(monitor);
@@ -760,6 +828,10 @@ export function createMockDataSource(): DataSource {
             ended_at: incident.ended_at,
             cause: incident.cause,
             duration_seconds: incident.duration_seconds,
+            // 公開が許可されたものだけ（本番の public_status と同じ）。
+            ...(incident.postmortem_is_public && incident.postmortem
+              ? { postmortem: incident.postmortem }
+              : {}),
           })),
       } satisfies PublicStatus;
     },

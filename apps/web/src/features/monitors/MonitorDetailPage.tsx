@@ -1,6 +1,8 @@
 import {
   canEditMonitor,
   canManageMonitor,
+  certificateStatus,
+  formatDaysRemaining,
   CHECK_ERROR_KIND_LABELS,
   CHECK_INTERVAL_LABELS,
   detectionDelaySeconds,
@@ -11,6 +13,7 @@ import {
   isCheckInterval,
   observedWindowSeconds,
   timeBasedUptime,
+  type MonitorOverviewRow,
   WINDOW_SECONDS,
 } from '@statuspulse/core';
 import { useState } from 'react';
@@ -22,7 +25,7 @@ import { useDashboard } from '@/features/dashboard/api';
 import { useIncidents } from '@/features/incidents/api';
 import { IncidentTimeline } from '@/features/incidents/IncidentTimeline';
 import { SharingCard } from '@/features/sharing/SharingCard';
-import { formatDateTime, formatDuration } from '@/lib/format';
+import { formatDateTime, formatDuration, formatRelativeTime } from '@/lib/format';
 
 import { MonitorFormDialog } from './MonitorFormDialog';
 import { MONITOR_CHECK_HISTORY_LIMIT, useDeleteMonitor, useMonitorChecks } from './api';
@@ -35,6 +38,74 @@ import { MONITOR_CHECK_HISTORY_LIMIT, useDeleteMonitor, useMonitorChecks } from 
  * ほぼ確実にキャッシュが温まっているため。
  * 直接 URL を開いた場合は一覧のクエリがそのまま走るので、どちらでも表示できる。
  */
+const CERTIFICATE_TONES: Record<string, string> = {
+  ok: 'text-slate-900',
+  expiring: 'text-warn-700',
+  critical: 'text-down-700',
+  expired: 'text-down-700',
+  unknown: 'text-slate-400',
+};
+
+/**
+ * TLS 証明書の状態。
+ *
+ * 取得できなかったこと（certificate_error）と、期限が近いことを別に扱う。
+ * 取得に失敗しただけで「期限不明」と出すと、直前まで分かっていた情報が消えたのか
+ * 証明書そのものに問題があるのかが区別できない。
+ */
+function CertificateCard({ monitor }: { monitor: MonitorOverviewRow }) {
+  if (!monitor.url.startsWith('https://')) return null;
+
+  const status = certificateStatus(monitor.certificate_expires_at);
+
+  return (
+    <Card className="px-4 py-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-sm font-semibold text-slate-900">TLS 証明書</h2>
+        {monitor.certificate_checked_at && (
+          <span className="text-xs text-slate-400">
+            {formatRelativeTime(monitor.certificate_checked_at)}に確認
+          </span>
+        )}
+      </div>
+
+      {!monitor.check_certificate ? (
+        <p className="mt-2 text-sm text-slate-500">この対象では証明書を監視していません。</p>
+      ) : monitor.certificate_error ? (
+        <div className="mt-2">
+          <p className="text-sm font-medium text-down-700">証明書を取得できませんでした</p>
+          <p className="mt-1 text-xs text-slate-500">{monitor.certificate_error}</p>
+        </div>
+      ) : (
+        <dl className="mt-3 grid gap-4 sm:grid-cols-3">
+          <div>
+            <dt className="text-xs text-slate-500">残り</dt>
+            <dd
+              className={
+                'tabular mt-0.5 text-sm font-semibold ' + (CERTIFICATE_TONES[status] ?? '')
+              }
+            >
+              {formatDaysRemaining(monitor.certificate_expires_at)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-slate-500">期限</dt>
+            <dd className="tabular mt-0.5 text-sm text-slate-900">
+              {formatDateTime(monitor.certificate_expires_at)}
+            </dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-xs text-slate-500">発行者</dt>
+            <dd className="mt-0.5 truncate text-sm text-slate-900">
+              {monitor.certificate_issuer ?? '—'}
+            </dd>
+          </div>
+        </dl>
+      )}
+    </Card>
+  );
+}
+
 export function MonitorDetailPage() {
   const { monitorId = '' } = useParams();
   const navigate = useNavigate();
@@ -217,10 +288,16 @@ export function MonitorDetailPage() {
               この対象が異常と判定されたことはありません。
             </p>
           ) : (
-            <IncidentTimeline incidents={incidents.data ?? []} showMonitor={false} />
+            <IncidentTimeline
+              incidents={incidents.data ?? []}
+              showMonitor={false}
+              canEdit={canEdit}
+            />
           )}
         </div>
       </Card>
+
+      <CertificateCard monitor={monitor} />
 
       <SharingCard monitor={monitor} />
 

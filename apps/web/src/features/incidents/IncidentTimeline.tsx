@@ -9,6 +9,8 @@ import { Link } from 'react-router-dom';
 import { cn } from '@/components/ui';
 import { formatShortDateTime } from '@/lib/format';
 
+import { PostmortemEditor } from './PostmortemEditor';
+
 /**
  * ダウンタイムのタイムライン。
  *
@@ -83,9 +85,11 @@ function groupByDate(incidents: readonly IncidentOverviewRow[]) {
 function IncidentItem({
   incident,
   showMonitor,
+  canEdit,
 }: {
   incident: IncidentOverviewRow;
   showMonitor: boolean;
+  canEdit: boolean;
 }) {
   const ongoing = incident.ended_at === null;
 
@@ -141,6 +145,8 @@ function IncidentItem({
           {incident.error_message}
         </p>
       )}
+
+      <PostmortemEditor incident={incident} canEdit={canEdit} />
     </li>
   );
 }
@@ -148,9 +154,12 @@ function IncidentItem({
 export function IncidentTimeline({
   incidents,
   showMonitor = true,
+  canEdit = false,
 }: {
   incidents: readonly IncidentOverviewRow[];
   showMonitor?: boolean;
+  /** ポストモーテムを書けるか（editor 以上）。防御は RLS 側にある。 */
+  canEdit?: boolean;
 }) {
   return (
     <div className="space-y-6">
@@ -159,7 +168,12 @@ export function IncidentTimeline({
           <p className="text-xs font-medium text-slate-500">{date}</p>
           <ul className="mt-2.5 space-y-4 border-l border-slate-200 pl-1.5">
             {items.map((incident) => (
-              <IncidentItem key={incident.id} incident={incident} showMonitor={showMonitor} />
+              <IncidentItem
+                key={incident.id}
+                incident={incident}
+                showMonitor={showMonitor}
+                canEdit={canEdit}
+              />
             ))}
           </ul>
         </div>

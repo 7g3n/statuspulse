@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { dataSource } from '@/lib/data-source';
 import { queryKeys } from '@/lib/query-keys';
@@ -22,5 +22,29 @@ export function useIncidents(monitorId?: string) {
     // ダッシュボードと同じ間隔で取り直す。
     refetchInterval: DASHBOARD_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: false,
+  });
+}
+
+/**
+ * ポストモーテムの保存（Phase 4）。
+ *
+ * 一覧のキーを絞らずまとめて無効化する。同じ障害が「全対象の履歴」と
+ * 「その対象の履歴」の2つのキャッシュに載っているので、片方だけ更新すると
+ * 画面を移動したときに古い本文が出る。
+ */
+export function useSetIncidentPostmortem() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      incidentId,
+      text,
+      isPublic,
+    }: {
+      incidentId: string;
+      text: string;
+      isPublic: boolean;
+    }) => dataSource.setIncidentPostmortem(incidentId, text, isPublic),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['incidents'] }),
   });
 }

@@ -36,6 +36,8 @@ function toFormValues(monitor: MonitorOverviewRow): MonitorFormValues {
       ? monitor.interval_seconds
       : MONITOR_FORM_DEFAULTS.intervalSeconds,
     failureThreshold: monitor.failure_threshold,
+    expectedBodyText: monitor.expected_body_text,
+    checkCertificate: monitor.check_certificate,
     timeoutMs: monitor.timeout_ms,
     expectedStatusCode: monitor.expected_status_code,
     isEnabled: monitor.is_enabled,
@@ -209,6 +211,38 @@ export function MonitorFormDialog({
             ))}
           </Select>
         </Field>
+
+        <Field
+          label="本文に含まれているべき文字列"
+          htmlFor="expectedBodyText"
+          hint="空欄なら本文を見ません。ステータスが 200 でも中身が壊れている状態を捉えるための設定です"
+          error={errors.expectedBodyText?.message}
+        >
+          <Input
+            id="expectedBodyText"
+            placeholder="ログイン"
+            maxLength={200}
+            {...register('expectedBodyText', {
+              // 空欄は「設定なし」。空文字のまま送ると DB では「空文字を含むか」になる。
+              setValueAs: (value: unknown) =>
+                typeof value === 'string' && value.trim() !== '' ? value : null,
+            })}
+          />
+        </Field>
+
+        <label className="flex items-start gap-2.5">
+          <input
+            type="checkbox"
+            className="mt-0.5 size-4 rounded border-slate-300 text-brand-600 focus:ring-brand-600"
+            {...register('checkCertificate')}
+          />
+          <span className="text-sm text-slate-700">
+            TLS 証明書の期限を監視する
+            <span className="mt-0.5 block text-xs text-slate-500">
+              1日1回、残り30日と7日で通知します。http:// の URL では無視されます。
+            </span>
+          </span>
+        </label>
 
         <label className="flex items-start gap-2.5">
           <input

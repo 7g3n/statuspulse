@@ -13,6 +13,7 @@
 
 import { detectionDelaySeconds } from './incident.js';
 import { CHECK_ERROR_KIND_LABELS, type CheckErrorKind } from './monitor.js';
+import { formatDaysRemaining } from './tls.js';
 import { formatDowntime } from './uptime.js';
 
 /** Slack Incoming Webhook に POST する本体。 */
@@ -202,6 +203,75 @@ export function buildRecoveredMessage(
 
   return {
     text: `[復旧] ${info.monitorName} — 停止 ${downtime}`,
+    blocks,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 証明書の期限（Phase 4）                                                     */
+/* -------------------------------------------------------------------------- */
+
+export type CertificateNotification = {
+  monitorName: string;
+  url: string;
+  expiresAt: string;
+  issuer: string | null;
+  /** この通知を出した閾値（30 または 7）。文面の強さを変える。 */
+  thresholdDays: number;
+};
+
+/**
+ * 証明書の期限が近いことの通知。
+ *
+ * ダウンの通知と文面の強さを変えている。証明書の期限は「まだ落ちていないが、
+ * 放っておけば必ず落ちる」という性質のもので、対応の緊急度が違う。
+ * 残り7日を切ったら、その違いも消える。
+ */
+export function buildCertificateMessage(
+  info: CertificateNotification,
+  context: NotificationContext = {},
+): SlackMessage {
+  const critical = info.thresholdDays <= 7;
+  const remaining = formatDaysRemaining(info.expiresAt);
+  const icon = critical ? ':rotating_light:' : ':warning:';
+  const heading = critical
+    ? `*${info.monitorName}* の証明書がまもなく期限切れです`
+    : `*${info.monitorName}* の証明書の期限が近づいています`;
+
+  const blocks: SlackBlock[] = [
+    { type: 'section', text: { type: 'mrkdwn', text: `${icon} ${heading}` } },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*残り*\n${remaining}` },
+        { type: 'mrkdwn', text: `*期限*\n${formatJst(info.expiresAt)}` },
+        { type: 'mrkdwn', text: `*URL*\n${info.url}` },
+        { type: 'mrkdwn', text: `*発行者*\n${info.issuer ?? '不明'}` },
+      ],
+    },
+  ];
+
+  if (info.issuer?.includes('Let') === true) {
+    blocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: '自動更新が動いていれば、この通知が届く前に更新されているはずです。',
+        },
+      ],
+    });
+  }
+
+  if (context.appUrl) {
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `<${context.appUrl}|StatusPulse で見る>` }],
+    });
+  }
+
+  return {
+    text: `[証明書] ${info.monitorName} — ${remaining}で期限切れ`,
     blocks,
   };
 }

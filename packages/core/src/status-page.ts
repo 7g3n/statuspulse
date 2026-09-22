@@ -28,6 +28,13 @@ export type PublicStatusIncident = {
   ended_at: string | null;
   cause: CheckErrorKind;
   duration_seconds: number;
+  /**
+   * 公開が許可されたポストモーテム（Phase 4）。
+   *
+   * 許可されていなければキーごと存在しない。`null` を返すのではなく
+   * 「無い」状態にしてあるのは、社内向けのメモが空文字として漏れる経路を作らないため。
+   */
+  postmortem?: string | null;
 };
 
 export type PublicStatusWindow = {

@@ -45,6 +45,7 @@ export const CHECK_ERROR_KINDS = [
   'tls', // 証明書の検証に失敗した
   'network', // 接続そのものが確立できなかった
   'status', // 応答は返ったが、期待するステータスコードではなかった
+  'body', // ステータスは正常だが、本文に期待する文字列が無かった（Phase 4）
   'unknown', // 上記に分類できなかった
 ] as const;
 export type CheckErrorKind = (typeof CHECK_ERROR_KINDS)[number];
@@ -55,6 +56,7 @@ export const CHECK_ERROR_KIND_LABELS: Record<CheckErrorKind, string> = {
   tls: '証明書エラー',
   network: '接続エラー',
   status: 'ステータス異常',
+  body: '本文が期待と違う',
   unknown: '不明なエラー',
 };
 
@@ -168,31 +170,68 @@ export type CheckObservation = {
 };
 
 /**
+ * レスポンス本文に、期待する文字列が含まれているか（Phase 4）。
+ *
+ * 正規表現ではなく「含まれているか」だけにしている。
+ * 正規表現は書き手が意図しない量の計算を招きうる（Worker の実行時間を食う）うえ、
+ * 監視の設定としては「この文字列が消えたら異常」で足りることがほとんど。
+ */
+export function matchesExpectedBody(body: string, expected: string | null): boolean {
+  if (expected === null || expected === '') return true;
+  return body.includes(expected);
+}
+
+/** 本文チェックのために読む上限。これを超えるぶんは切り捨てて判定する。 */
+export const MAX_BODY_BYTES = 512 * 1024;
+
+export type BodyExpectation = {
+  /** 読み取った本文（上限まで）。 */
+  text: string;
+  /** 期待する文字列。null なら本文を判定しない。 */
+  expected: string | null;
+};
+
+/**
  * 応答が返ってきた場合の観測結果を組み立てる。
  *
  * ステータスが期待どおりでなくても responseTimeMs は残す。
  * 「500 を返しているが応答は速い」と「応答自体が遅い」は別の障害で、
  * 後から切り分けるには両方の記録が要る。
+ *
+ * 本文チェック（Phase 4）はステータスの判定を通ったあとに行う。
+ * 500 が返っているときに「本文が違う」と報告しても、原因の手がかりにならない。
+ * 先に起きている異常の方を理由として残す。
  */
 export function observeResponse(
   statusCode: number,
   responseTimeMs: number,
   expectedStatusCode: number | null,
+  body?: BodyExpectation,
 ): CheckObservation {
-  if (isAcceptableStatus(statusCode, expectedStatusCode)) {
-    return { result: 'up', statusCode, responseTimeMs, errorKind: null, errorMessage: null };
+  if (!isAcceptableStatus(statusCode, expectedStatusCode)) {
+    return {
+      result: 'down',
+      statusCode,
+      responseTimeMs,
+      errorKind: 'status',
+      errorMessage:
+        expectedStatusCode === null
+          ? 'HTTP ' + statusCode + ' が返りました'
+          : 'HTTP ' + statusCode + ' が返りました（期待: ' + expectedStatusCode + '）',
+    };
   }
 
-  return {
-    result: 'down',
-    statusCode,
-    responseTimeMs,
-    errorKind: 'status',
-    errorMessage:
-      expectedStatusCode === null
-        ? 'HTTP ' + statusCode + ' が返りました'
-        : 'HTTP ' + statusCode + ' が返りました（期待: ' + expectedStatusCode + '）',
-  };
+  if (body && !matchesExpectedBody(body.text, body.expected)) {
+    return {
+      result: 'down',
+      statusCode,
+      responseTimeMs,
+      errorKind: 'body',
+      errorMessage: '本文に「' + body.expected + '」が含まれていません',
+    };
+  }
+
+  return { result: 'up', statusCode, responseTimeMs, errorKind: null, errorMessage: null };
 }
 
 /**

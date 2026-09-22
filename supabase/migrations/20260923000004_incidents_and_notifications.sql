@@ -41,7 +41,7 @@ alter table monitors alter column failure_threshold set default 2;
 -- checks（点）から導かれる集約だが、都度計算せずテーブルとして持つ。
 --   - 通知の重複判定に安定した ID が要る（「この障害」を一意に指せる必要がある）
 --   - 保持期間を過ぎて checks が消えても、障害の記録は残したい
---   - Phase 4 のポストマーテムは、この行にぶら下げる
+--   - Phase 4 のポストモーテムは、この行にぶら下げる
 -- -----------------------------------------------------------------------------
 create table incidents (
   id uuid primary key default gen_random_uuid(),

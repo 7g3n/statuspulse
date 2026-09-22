@@ -69,6 +69,13 @@ export type Database = {
           status_changed_at: string | null;
           created_at: string;
           updated_at: string;
+          /** 本文に含まれているべき文字列（Phase 4）。null なら本文を見ない。 */
+          expected_body_text: string | null;
+          check_certificate: boolean;
+          certificate_expires_at: string | null;
+          certificate_issuer: string | null;
+          certificate_checked_at: string | null;
+          certificate_error: string | null;
         };
         Insert: {
           id?: string;
@@ -81,6 +88,8 @@ export type Database = {
           timeout_ms?: number;
           is_enabled?: boolean;
           failure_threshold?: number;
+          expected_body_text?: string | null;
+          check_certificate?: boolean;
           created_at?: string;
         };
         /**
@@ -97,6 +106,8 @@ export type Database = {
           timeout_ms?: number;
           is_enabled?: boolean;
           failure_threshold?: number;
+          expected_body_text?: string | null;
+          check_certificate?: boolean;
         };
         Relationships: [
           {
@@ -146,6 +157,11 @@ export type Database = {
           error_message: string | null;
           failure_count: number;
           created_at: string;
+          /** ポストモーテム（Phase 4）。set_incident_postmortem() のみが書く。 */
+          postmortem: string;
+          postmortem_is_public: boolean;
+          postmortem_updated_at: string | null;
+          postmortem_updated_by: string | null;
         };
         /** 開閉は record_check() のみ。 */
         Insert: Record<string, never>;
@@ -276,6 +292,12 @@ export type Database = {
           member_count: number;
           status_page_slug: string | null;
           status_page_published: boolean;
+          expected_body_text: string | null;
+          check_certificate: boolean;
+          certificate_expires_at: string | null;
+          certificate_issuer: string | null;
+          certificate_checked_at: string | null;
+          certificate_error: string | null;
         };
         Relationships: [];
       };
@@ -294,6 +316,9 @@ export type Database = {
           error_message: string | null;
           failure_count: number;
           duration_seconds: number;
+          postmortem: string;
+          postmortem_is_public: boolean;
+          postmortem_updated_at: string | null;
           down_notification_status: Database['public']['Enums']['notification_status'] | null;
           recovered_notification_status: Database['public']['Enums']['notification_status'] | null;
         };
@@ -311,6 +336,7 @@ export type Database = {
           url: string;
           method: Database['public']['Enums']['http_method'];
           expected_status_code: number | null;
+          expected_body_text: string | null;
           interval_seconds: number;
           timeout_ms: number;
           failure_threshold: number;
@@ -344,7 +370,7 @@ export type Database = {
           p_kind: Database['public']['Enums']['notification_kind'];
           p_dedupe_key: string;
           p_monitor_id: string;
-          p_incident_id: string;
+          p_incident_id: string | null;
           p_payload?: Json;
         };
         Returns: boolean;
@@ -358,6 +384,29 @@ export type Database = {
           p_error_message?: string | null;
         };
         Returns: undefined;
+      };
+
+      /** 定期処理（service_role）専用。証明書を検査すべき対象。 */
+      due_certificate_checks: {
+        Args: { p_limit?: number };
+        Returns: { id: string; name: string; url: string }[];
+      };
+
+      /** 定期処理（service_role）専用。取得できなかった場合も error として記録する。 */
+      record_certificate: {
+        Args: {
+          p_monitor_id: string;
+          p_expires_at?: string | null;
+          p_issuer?: string | null;
+          p_error?: string | null;
+        };
+        Returns: undefined;
+      };
+
+      /** editor 以上が書ける。空文字にすると「未記入」に戻る。 */
+      set_incident_postmortem: {
+        Args: { p_incident_id: string; p_postmortem: string; p_is_public?: boolean };
+        Returns: Database['public']['Tables']['incidents']['Row'];
       };
 
       /** 認証不要で呼べる唯一の関数。slug を知らなければ null が返る。 */
@@ -434,9 +483,9 @@ export type Database = {
       user_role: 'owner' | 'member';
       monitor_status: 'unknown' | 'up' | 'down';
       check_result: 'up' | 'down';
-      check_error_kind: 'timeout' | 'dns' | 'tls' | 'network' | 'status' | 'unknown';
+      check_error_kind: 'timeout' | 'dns' | 'tls' | 'network' | 'status' | 'body' | 'unknown';
       http_method: 'GET' | 'HEAD';
-      notification_kind: 'monitor_down' | 'monitor_recovered';
+      notification_kind: 'monitor_down' | 'monitor_recovered' | 'certificate_expiring';
       notification_status: 'pending' | 'sent' | 'failed' | 'skipped';
       member_role: 'owner' | 'editor' | 'viewer';
     };

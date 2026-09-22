@@ -129,6 +129,13 @@ function IncidentList({ status }: { status: PublicStatus }) {
             {formatDowntime(incident.duration_seconds)}
           </span>
           <span className="text-xs text-slate-500">{describeCause(incident.cause, null)}</span>
+
+          {/* 公開が許可されたメモだけが届く（許可されていなければキーごと無い）。 */}
+          {incident.postmortem && (
+            <p className="mt-1 w-full whitespace-pre-wrap rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-700">
+              {incident.postmortem}
+            </p>
+          )}
         </li>
       ))}
     </ul>

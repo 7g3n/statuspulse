@@ -67,6 +67,8 @@ export type DataSource = {
   loadMonitorChecks(monitorId: string, limit: number): Promise<CheckRow[]>;
   /** ダウンタイムの履歴。monitorId を省くと全対象ぶんを新しい順で返す。 */
   loadIncidents(options: IncidentQuery): Promise<IncidentOverviewRow[]>;
+  /** ポストモーテムの保存（Phase 4）。空文字にすると「未記入」に戻る。 */
+  setIncidentPostmortem(incidentId: string, text: string, isPublic: boolean): Promise<void>;
 
   createMonitor(values: MonitorFormValues): Promise<void>;
   updateMonitor(monitorId: string, values: MonitorFormValues): Promise<void>;

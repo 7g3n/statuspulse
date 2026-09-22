@@ -18,18 +18,26 @@
  */
 import type { Database, DueMonitorRow, RecordCheckResult } from '@statuspulse/core';
 import {
+  buildCertificateMessage,
+  buildClientHello,
   buildDownMessage,
   buildRecoveredMessage,
+  certificateAlertThreshold,
+  certificateDedupeKey,
   classifyFetchError,
   downDedupeKey,
+  extractCertificateDer,
   incidentDurationSeconds,
+  MAX_BODY_BYTES,
   observeFailure,
   observeResponse,
+  parseCertificate,
   recoveredDedupeKey,
   type CheckObservation,
   type SlackMessage,
 } from '@statuspulse/core';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { connect } from 'cloudflare:sockets';
 
 export type Env = {
   SUPABASE_URL: string;
@@ -45,6 +53,8 @@ export type Env = {
   CHECK_CONCURRENCY?: string;
   /** 観測ログの保持日数（wrangler.toml の vars）。 */
   CHECK_RETENTION_DAYS?: string;
+  /** 1回の起動で検査する証明書の数（wrangler.toml の vars）。 */
+  MAX_CERTIFICATES_PER_RUN?: string;
 };
 
 type Client = SupabaseClient<Database>;
@@ -87,6 +97,7 @@ function createSupabaseClient(env: Env): Client {
  */
 export async function runCheck(monitor: DueMonitorRow): Promise<CheckObservation> {
   const startedAt = Date.now();
+  const expectedBody = monitor.expected_body_text;
 
   try {
     const response = await fetch(monitor.url, {
@@ -105,11 +116,21 @@ export async function runCheck(monitor: DueMonitorRow): Promise<CheckObservation
 
     const responseTimeMs = Date.now() - startedAt;
 
-    // 本文は読まないが、開いたままにすると接続が解放されない。
-    // Phase 4 の本文チェックを入れるときは、ここで読む形に変える。
-    await response.body?.cancel();
+    // 本文を読むのは、チェックする文字列が設定されている対象だけ。
+    // 毎回すべて読むと、監視のためだけに全対象ぶんの転送量と
+    // Worker の実行時間を消費し続けることになる。
+    if (expectedBody === null) {
+      // 読まない場合も、開いたままにすると接続が解放されない。
+      await response.body?.cancel();
+      return observeResponse(response.status, responseTimeMs, monitor.expected_status_code);
+    }
 
-    return observeResponse(response.status, responseTimeMs, monitor.expected_status_code);
+    const text = await readBody(response);
+
+    return observeResponse(response.status, responseTimeMs, monitor.expected_status_code, {
+      text,
+      expected: expectedBody,
+    });
   } catch (error) {
     const kind = classifyFetchError(error);
     const message = error instanceof Error ? error.message : String(error);
@@ -127,6 +148,47 @@ export async function runCheck(monitor: DueMonitorRow): Promise<CheckObservation
 
     return observeFailure(kind, message);
   }
+}
+
+/**
+ * 本文を上限まで読む。
+ *
+ * response.text() をそのまま呼ばないのは、相手が巨大なファイルを返している場合に
+ * Worker のメモリと実行時間を使い切ってしまうため。
+ * 監視の設定に書く文字列はページの先頭近くにあるのが普通なので、上限で切って構わない。
+ */
+async function readBody(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    while (total < MAX_BODY_BYTES) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.length;
+      }
+    }
+  } finally {
+    // 上限で打ち切った場合、残りは読まずに接続を閉じる。
+    await reader.cancel().catch(() => undefined);
+  }
+
+  const merged = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, at);
+    at += chunk.length;
+  }
+
+  // 文字化けしても includes の判定には影響しない範囲なので、UTF-8 として読む。
+  return new TextDecoder('utf-8', { fatal: false, ignoreBOM: false }).decode(
+    merged.subarray(0, MAX_BODY_BYTES),
+  );
 }
 
 /**
@@ -269,6 +331,216 @@ async function notifyTransition(
     console.error('通知の送信に失敗しました', reason);
     return 'failed';
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* TLS 証明書の期限（Phase 4）                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 証明書の有効期限を取る。
+ *
+ * **なぜこんなことをしているのか**
+ *   Cloudflare Workers の fetch() は相手の証明書を見せてくれず、Node の tls も無い。
+ *   この実行環境に「証明書の期限を知る」手段が用意されていないので、
+ *   生の TCP を開いて TLS ハンドシェイクを自分で始め、サーバーが返す
+ *   Certificate メッセージを読む。
+ *
+ *   ハンドシェイクは完了させない。証明書を受け取った時点で目的は果たされるので、
+ *   そこで接続を閉じる（鍵交換も検証もこちらではしない）。
+ *
+ * 組み立てと解析は @statuspulse/core の tls.ts にある純粋関数で、
+ * ここが持つのはソケットの開閉と読み書きだけ。
+ */
+export async function fetchCertificate(
+  hostname: string,
+  port = 443,
+  timeoutMs = 8000,
+): Promise<{ expiresAt: string; issuer: string | null }> {
+  const socket = connect({ hostname, port }, { secureTransport: 'off', allowHalfOpen: false });
+
+  try {
+    const writer = socket.writable.getWriter();
+    await writer.write(buildClientHello(hostname));
+    writer.releaseLock();
+
+    const reader = socket.readable.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const deadline = Date.now() + timeoutMs;
+
+    try {
+      // 証明書チェーンは数 KB になる。64KB 読んで見つからなければ諦める。
+      while (total < 64 * 1024) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('証明書の取得がタイムアウトしました');
+
+        const { value, done } = await withTimeout(reader.read(), remaining);
+        if (done) break;
+        if (!value || value.length === 0) continue;
+
+        chunks.push(value);
+        total += value.length;
+
+        const der = extractCertificateDer(mergeChunks(chunks, total));
+        if (der) {
+          const info = parseCertificate(der);
+          return { expiresAt: info.notAfter.toISOString(), issuer: info.issuer };
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+
+    throw new Error('Certificate メッセージが見つかりませんでした');
+  } finally {
+    await socket.close().catch(() => undefined);
+  }
+}
+
+function mergeChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const merged = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, at);
+    at += chunk.length;
+  }
+  return merged;
+}
+
+/** ソケットの読み取りには AbortSignal が使えないので、競争で打ち切る。 */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('証明書の取得がタイムアウトしました')), ms),
+    ),
+  ]);
+}
+
+export type CertificateOutcome = {
+  name: string;
+  expiresAt: string | null;
+  issuer: string | null;
+  error?: string;
+  notified?: NotifyOutcome | null;
+};
+
+/**
+ * 期限が近い証明書を Slack に流す。
+ *
+ * 重複を防ぐ鍵に**証明書の期限そのもの**を含めるのが要点。
+ * 証明書が更新されれば鍵が変わるので次の通知が届き、更新されない限り二度は鳴らない。
+ * 「日付ごとに1回」にすると、更新されないまま毎日鳴り続けて読まれなくなる。
+ */
+async function notifyCertificate(
+  env: Env,
+  supabase: Client,
+  monitor: { id: string; name: string; url: string },
+  expiresAt: string,
+  issuer: string | null,
+): Promise<NotifyOutcome | null> {
+  const thresholdDays = certificateAlertThreshold(expiresAt);
+  if (thresholdDays === null) return null;
+
+  const dedupeKey = certificateDedupeKey(monitor.id, expiresAt, thresholdDays);
+
+  const { data: claimed, error } = await supabase.rpc('claim_notification', {
+    p_kind: 'certificate_expiring',
+    p_dedupe_key: dedupeKey,
+    p_monitor_id: monitor.id,
+    p_incident_id: null,
+    p_payload: { monitor_name: monitor.name, expires_at: expiresAt, threshold: thresholdDays },
+  });
+
+  if (error) throw new Error(`通知の記録に失敗しました: ${error.message}`);
+  if (claimed !== true) return 'duplicate';
+
+  const message = buildCertificateMessage(
+    { monitorName: monitor.name, url: monitor.url, expiresAt, issuer, thresholdDays },
+    { appUrl: env.APP_URL },
+  );
+
+  try {
+    const outcome = await sendToSlack(env, message);
+    await supabase.rpc('settle_notification', { p_dedupe_key: dedupeKey, p_status: outcome });
+    return outcome;
+  } catch (caught) {
+    const reason = caught instanceof Error ? caught.message : String(caught);
+    await supabase.rpc('settle_notification', {
+      p_dedupe_key: dedupeKey,
+      p_status: 'failed',
+      p_error_message: reason,
+    });
+    return 'failed';
+  }
+}
+
+/**
+ * 証明書の検査。
+ *
+ * 到達性のチェックと分けてあるのは頻度がまったく違うため。
+ * 有効期限は数か月単位で動くもので、1分ごとに確かめる意味がない。
+ * 同じ処理に混ぜると、毎分の TLS ハンドシェイクを監視先に強いることになる。
+ *
+ * 失敗しても記録する。**取得できないこと自体が知りたい情報**で、
+ * 黙って前回の値を残すと「期限は大丈夫」と誤読される。
+ */
+export async function runCertificateChecks(env: Env): Promise<CertificateOutcome[]> {
+  const supabase = createSupabaseClient(env);
+  const limit = numberFromEnv(env.MAX_CERTIFICATES_PER_RUN, 5);
+
+  const { data, error } = await supabase.rpc('due_certificate_checks', { p_limit: limit });
+  if (error) throw new Error(`証明書の検査対象の取得に失敗しました: ${error.message}`);
+
+  const results: CertificateOutcome[] = [];
+
+  for (const monitor of data ?? []) {
+    try {
+      const parsed = new URL(monitor.url);
+      const certificate = await fetchCertificate(
+        parsed.hostname,
+        parsed.port ? Number(parsed.port) : 443,
+      );
+
+      await supabase.rpc('record_certificate', {
+        p_monitor_id: monitor.id,
+        p_expires_at: certificate.expiresAt,
+        p_issuer: certificate.issuer,
+        p_error: null,
+      });
+
+      const notified = await notifyCertificate(
+        env,
+        supabase,
+        monitor,
+        certificate.expiresAt,
+        certificate.issuer,
+      );
+
+      results.push({
+        name: monitor.name,
+        expiresAt: certificate.expiresAt,
+        issuer: certificate.issuer,
+        notified,
+      });
+    } catch (caught) {
+      const reason = caught instanceof Error ? caught.message : String(caught);
+
+      // 期限は消さずに残さず、エラーだけを別の列に書く方針ではなく、
+      // 取得できなかったことを明示する（前回の値を残すと「大丈夫」と誤読される）。
+      await supabase.rpc('record_certificate', {
+        p_monitor_id: monitor.id,
+        p_expires_at: null,
+        p_issuer: null,
+        p_error: reason.slice(0, 300),
+      });
+
+      results.push({ name: monitor.name, expiresAt: null, issuer: null, error: reason });
+    }
+  }
+
+  return results;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -423,7 +695,18 @@ export default {
           console.log('状態が変化した対象', JSON.stringify(result.transitions));
         }
 
-        const purged = await purgeIfScheduled(env, new Date(event.scheduledTime));
+        const scheduledAt = new Date(event.scheduledTime);
+
+        // 証明書の検査は毎時 0 分の回だけ。1日1回で足りるが、
+        // 1回の起動で扱う数に上限があるので、時間ごとに少しずつ消化する。
+        const certificates =
+          scheduledAt.getUTCMinutes() === 0 ? await runCertificateChecks(env) : null;
+
+        if (certificates && certificates.length > 0) {
+          console.log('証明書の検査', JSON.stringify(certificates));
+        }
+
+        const purged = await purgeIfScheduled(env, scheduledAt);
 
         console.log(
           JSON.stringify({
@@ -446,8 +729,12 @@ export default {
    * 手動確認用。`wrangler dev` 中に GET すると、その時点の判定結果を返す。
    * 毎分の起動を待たずに動作を確かめられるようにしておく。
    */
-  async fetch(_request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     try {
+      // 証明書の検査は毎時 0 分の回しか回らないので、手で確かめる入口を分けておく。
+      if (new URL(request.url).pathname === '/certificates') {
+        return Response.json(await runCertificateChecks(env));
+      }
       return Response.json(await runChecks(env));
     } catch (error) {
       return Response.json({ error: String(error) }, { status: 500 });

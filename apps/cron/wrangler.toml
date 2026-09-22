@@ -33,6 +33,11 @@ CHECK_CONCURRENCY = "5"
 # 観測ログの保持日数。これを超えた行は1日1回まとめて削除する。
 CHECK_RETENTION_DAYS = "30"
 
+# 1回の起動で検査する証明書の数。
+# 証明書の検査は TLS ハンドシェイクを1本ずつ張るので、到達性のチェックより重い。
+# 毎時 0 分の回に少しずつ消化する（有効期限は数か月単位で動くので1日1回で足りる）。
+MAX_CERTIFICATES_PER_RUN = "5"
+
 # 通知に載せるダッシュボードの URL。未設定ならリンクを出さない。
 # APP_URL = "https://statuspulse.example.com"
 

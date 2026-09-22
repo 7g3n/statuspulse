@@ -53,6 +53,8 @@ function toMonitorColumns(input: MonitorFormValues) {
     interval_seconds: values.intervalSeconds,
     timeout_ms: values.timeoutMs,
     failure_threshold: values.failureThreshold,
+    expected_body_text: values.expectedBodyText,
+    check_certificate: values.checkCertificate,
     is_enabled: values.isEnabled,
   };
 }
@@ -148,6 +150,15 @@ export function createSupabaseDataSource(): DataSource {
       const { data, error } = await query;
       if (error) throw toError(error, 'ダウンタイム履歴の取得');
       return (data ?? []) as IncidentOverviewRow[];
+    },
+
+    async setIncidentPostmortem(incidentId, text, isPublic) {
+      const { error } = await supabase.rpc('set_incident_postmortem', {
+        p_incident_id: incidentId,
+        p_postmortem: text,
+        p_is_public: isPublic,
+      });
+      if (error) throw toError(error, 'ポストモーテムの保存');
     },
 
     async createMonitor(values) {

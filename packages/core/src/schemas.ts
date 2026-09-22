@@ -23,48 +23,75 @@ import {
 } from './monitor.js';
 import { isValidMonitorUrl, normalizeMonitorUrl } from './url.js';
 
-export const monitorFormSchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(1, '名前を入力してください')
-    .max(60, '名前は60文字以内で入力してください'),
+export const monitorFormSchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1, '名前を入力してください')
+      .max(60, '名前は60文字以内で入力してください'),
 
-  url: z.string().trim().min(1, 'URL を入力してください').refine(isValidMonitorUrl, {
-    message: 'http(s) の公開 URL を指定してください（localhost や私有 IP は監視できません）',
-  }),
+    url: z.string().trim().min(1, 'URL を入力してください').refine(isValidMonitorUrl, {
+      message: 'http(s) の公開 URL を指定してください（localhost や私有 IP は監視できません）',
+    }),
 
-  method: z.enum(HTTP_METHODS),
+    method: z.enum(HTTP_METHODS),
 
-  intervalSeconds: z
-    .number({ invalid_type_error: 'チェック間隔を選択してください' })
-    .int()
-    .refine(isCheckInterval, { message: 'チェック間隔が不正です' }),
+    intervalSeconds: z
+      .number({ invalid_type_error: 'チェック間隔を選択してください' })
+      .int()
+      .refine(isCheckInterval, { message: 'チェック間隔が不正です' }),
 
-  timeoutMs: z
-    .number({ invalid_type_error: 'タイムアウトを数値で入力してください' })
-    .int()
-    .min(MIN_TIMEOUT_MS, 'タイムアウトは1000ms 以上で指定してください')
-    .max(MAX_TIMEOUT_MS, 'タイムアウトは30000ms 以内で指定してください'),
+    timeoutMs: z
+      .number({ invalid_type_error: 'タイムアウトを数値で入力してください' })
+      .int()
+      .min(MIN_TIMEOUT_MS, 'タイムアウトは1000ms 以上で指定してください')
+      .max(MAX_TIMEOUT_MS, 'タイムアウトは30000ms 以内で指定してください'),
 
-  // 未指定（null）なら 2xx / 3xx を正常とみなす（monitor.ts の isAcceptableStatus 参照）。
-  expectedStatusCode: z
-    .number({ invalid_type_error: 'ステータスコードを数値で入力してください' })
-    .int()
-    .min(100, 'ステータスコードは100〜599で指定してください')
-    .max(599, 'ステータスコードは100〜599で指定してください')
-    .nullable(),
+    // 未指定（null）なら 2xx / 3xx を正常とみなす（monitor.ts の isAcceptableStatus 参照）。
+    expectedStatusCode: z
+      .number({ invalid_type_error: 'ステータスコードを数値で入力してください' })
+      .int()
+      .min(100, 'ステータスコードは100〜599で指定してください')
+      .max(599, 'ステータスコードは100〜599で指定してください')
+      .nullable(),
 
-  // 何回連続で失敗したら「異常」と判定するか（Phase 2）。
-  // 上限を 10 に抑えているのは、それ以上にすると検知の遅れが実用の範囲を超えるため。
-  failureThreshold: z
-    .number({ invalid_type_error: '連続失敗回数を選択してください' })
-    .int()
-    .min(1, '連続失敗回数は1以上で指定してください')
-    .max(10, '連続失敗回数は10以内で指定してください'),
+    // 何回連続で失敗したら「異常」と判定するか（Phase 2）。
+    // 上限を 10 に抑えているのは、それ以上にすると検知の遅れが実用の範囲を超えるため。
+    failureThreshold: z
+      .number({ invalid_type_error: '連続失敗回数を選択してください' })
+      .int()
+      .min(1, '連続失敗回数は1以上で指定してください')
+      .max(10, '連続失敗回数は10以内で指定してください'),
 
-  isEnabled: z.boolean(),
-});
+    /**
+     * 本文に含まれているべき文字列（Phase 4）。空欄なら本文を見ない。
+     *
+     * 200文字までにしているのは、監視の設定として長い文章を貼るのは
+     * 「そのページの一部をコピーしてきた」ことがほとんどで、
+     * わずかな文言変更で誤検知になるため。短く特徴的な一語を選ばせたい。
+     */
+    expectedBodyText: z
+      .string()
+      .trim()
+      .max(200, '本文チェックの文字列は200文字以内で指定してください')
+      .nullable(),
+
+    /** TLS 証明書の期限を監視するか。https 以外では無視される。 */
+    checkCertificate: z.boolean(),
+
+    isEnabled: z.boolean(),
+  })
+  // HEAD では本文が返らないので、本文チェックとは両立しない（DB 側にも同じ制約がある）。
+  .superRefine((values, context) => {
+    if (values.method === 'HEAD' && values.expectedBodyText) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['expectedBodyText'],
+        message: 'HEAD では本文が返りません。GET に変えるか、本文チェックを空にしてください',
+      });
+    }
+  });
 
 export type MonitorFormValues = z.infer<typeof monitorFormSchema>;
 
@@ -88,7 +115,13 @@ export const FAILURE_THRESHOLDS = [1, 2, 3, 4, 5] as const;
  * （出るとすれば、スキーマを通していない経路がある）。
  */
 export function normalizeMonitorValues(values: MonitorFormValues): MonitorFormValues {
-  return { ...values, name: values.name.trim(), url: normalizeMonitorUrl(values.url) };
+  return {
+    ...values,
+    name: values.name.trim(),
+    url: normalizeMonitorUrl(values.url),
+    // 空文字は「設定なし」。DB では NULL で表すので、ここで寄せる。
+    expectedBodyText: values.expectedBodyText?.trim() ? values.expectedBodyText.trim() : null,
+  };
 }
 
 /** 新規登録フォームの初期値。 */
@@ -103,5 +136,7 @@ export const MONITOR_FORM_DEFAULTS: MonitorFormValues = {
   // 1 は瞬間的な切断でも通知が飛ぶ。2 は「もう一度確かめてから言う」の最小形で、
   // 検知の遅れも1回ぶんに収まる（DB の既定値と揃えてある）。
   failureThreshold: 2,
+  expectedBodyText: null,
+  checkCertificate: true,
   isEnabled: true,
 };

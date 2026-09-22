@@ -450,11 +450,99 @@ $$;
 
 ---
 
-## Phase 4 以降で追加する予定のもの
+## Phase 4 で追加したもの
 
-| 追加するもの                   | 何のために                                        |
-| ------------------------------ | ------------------------------------------------- |
-| `incidents.postmortem`         | 障害へのメモ。公開ページにも出せるようにする      |
-| SSL 証明書の期限               | `monitors` に検査結果を持つ列を足す               |
-| レスポンス本文の文字列チェック | `monitors.expected_body` と照合結果               |
-| 招待トークン                   | 未登録のユーザーも招待できるようにする（判断 30） |
+### monitors への追加
+
+| 列                       | 型               | 備考                                        |
+| ------------------------ | ---------------- | ------------------------------------------- |
+| `expected_body_text`     | text NULL        | 本文に含まれているべき文字列。200文字まで   |
+| `check_certificate`      | boolean          | TLS 証明書の期限を監視するか                |
+| `certificate_expires_at` | timestamptz NULL | 検査結果。`record_certificate()` だけが書く |
+| `certificate_issuer`     | text NULL        | 発行者（O を優先、無ければ CN）             |
+| `certificate_checked_at` | timestamptz NULL | 最後に検査した時刻                          |
+| `certificate_error`      | text NULL        | 取得できなかった理由                        |
+
+```sql
+alter table monitors add constraint monitors_body_check_needs_get check (
+  expected_body_text is null or method = 'GET'
+);
+```
+
+HEAD では本文が返らないので両立しない。zod 側でも同じ検証をしている。
+
+`certificate_error` を期限とは別の列にしているのは、**取得に失敗したこと**と**期限が近いこと**が別の話だから。失敗時に前回の期限を残すと「期限は大丈夫」と誤読される。
+
+### incidents への追加
+
+| 列                      | 型               | 備考                         |
+| ----------------------- | ---------------- | ---------------------------- |
+| `postmortem`            | text             | 4000文字まで。既定は空文字   |
+| `postmortem_is_public`  | boolean          | 公開ページに載せるか         |
+| `postmortem_updated_at` | timestamptz NULL | 本文を空にすると NULL に戻る |
+| `postmortem_updated_by` | uuid NULL        | 最後に書いた人               |
+
+書くことと公開することを別のフラグにしてある。1つにすると「公開したくないから書かない」が起きる。
+
+### record_certificate(monitor_id, expires_at, issuer, error)
+
+検査結果を記録する。service_role 専用。取得できなかった場合も `error` を入れて呼ぶ。
+
+### due_certificate_checks(limit)
+
+検査すべき対象（https で、`check_certificate` が true で、最後の検査から20時間以上）を返す。service_role 専用。
+
+ちょうど24時間にすると、毎日わずかに遅れていき検査時刻が一周してしまうので20時間にしてある。
+
+### set_incident_postmortem(incident_id, postmortem, is_public)
+
+editor 以上が書ける。権限が無い場合は `INCIDENT_NOT_FOUND`（存在の有無を教えない）。
+
+本文を空文字にすると、更新時刻と更新者も NULL に戻る。「更新日時はあるが本文が無い」状態を作らない。
+
+### enum への追加
+
+| 型                  | 追加した値             | 何のために                     |
+| ------------------- | ---------------------- | ------------------------------ |
+| `check_error_kind`  | `body`                 | ステータスは正常だが本文が違う |
+| `notification_kind` | `certificate_expiring` | 証明書の期限が近い             |
+
+**追加だけを別のマイグレーションファイルに分けてある。** `alter type ... add value` で足した値は同じトランザクションの中では使えないため（[`decisions.md`](./decisions.md) の判断 37）。
+
+### public_status の拡張
+
+インシデントに `postmortem` が加わる。`postmortem_is_public` が true のものだけで、そうでなければ**キーごと存在しない**（空文字ではない）。
+
+---
+
+## 不変条件の自動検査
+
+Phase 1〜3 で手作業で確かめてきたものを `packages/db-tests` に移した。
+
+```bash
+pnpm db:start && pnpm db:reset
+pnpm test:db
+```
+
+確かめているもの:
+
+- `checks` / `incidents` / `notifications` はアプリから書けない
+- 判定のキャッシュ列（`current_status` など）は UPDATE できない。設定の列はできる
+- 閾値 N に届くまで down にならず、インシデントの開始時刻は最初の失敗になる
+- 継続中のインシデントは1対象に1本まで
+- 同じ鍵で二度 claim できない
+- viewer は変更できず、editor は変更できて削除できない、最後の owner は降格できない
+- `anon` はどのテーブルにも判定用の関数にも触れず、`public_status()` だけが通る
+- 公開ページの応答に、監視先 URL・ステータスコード・エラー本文・所有者が含まれない
+
+`pnpm test`（判定ロジックの単体テスト）には含めない。Docker を要するスイートを混ぜると、DB 無しで数百ミリ秒という速さが失われるため。
+
+---
+
+## この先に足すとしたら
+
+| 追加するもの           | 何のために                                            |
+| ---------------------- | ----------------------------------------------------- |
+| 招待トークン           | 未登録のユーザーも招待できるようにする（判断 30）     |
+| チェック結果の日次集約 | 保持期間を過ぎても長期の稼働率を残す（判断 12）       |
+| 複数対象の公開ページ   | 1枚のページに複数のサービスを載せる（判断 25 の注記） |

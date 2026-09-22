@@ -12,6 +12,7 @@
     "dev:mock": "pnpm --filter @statuspulse/web dev:mock",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "test:db": "pnpm --filter @statuspulse/db-tests test:db",
     "typecheck": "pnpm -r typecheck",
     "lint": "prettier --check .",
     "format": "prettier --write .",

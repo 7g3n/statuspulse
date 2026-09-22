@@ -1,0 +1,19 @@
+{
+  "name": "@statuspulse/db-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "echo \"DB が要るので pnpm test には含めない（pnpm test:db で実行する）\" && exit 0",
+    "test:db": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
