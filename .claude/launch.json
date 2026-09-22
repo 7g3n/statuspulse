@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-mock",
+      "runtimeExecutable": "corepack",
+      "runtimeArgs": ["pnpm", "dev:mock"],
+      "port": 5173
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "corepack",
+      "runtimeArgs": ["pnpm", "dev"],
+      "port": 5173
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+name = "statuspulse-cron"
+main = "src/index.ts"
+compatibility_date = "2024-10-22"
+
+# 監視のチェック。
+#
+# Cron Triggers は1本だけにして、毎分起動する。
+# 監視対象ごとに異なる間隔（1分〜1時間）を cron 式で表現することはできないし、
+# 対象を1つ追加するたびに Worker を再デプロイするのは筋が悪い。
+# 「今チェックすべき対象はどれか」は DB 側の due_monitors() が決める。
+#
+# Cron Triggers は UTC 固定だが、この Worker は時刻に依存しないので影響はない
+# （毎分起動し、経過時間だけを見る）。
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+# 秘密でない設定はここ。
+# SUPABASE_SERVICE_ROLE_KEY は `wrangler secret put` で登録し、ファイルには置かない。
+# このキーは RLS を迂回できるため、ブラウザ側の環境変数には絶対に設定しない。
+
+# 1回の起動で処理する監視対象の上限。
+# Workers には1リクエストあたりのサブリクエスト数上限があり（無料プランで50）、
+# 1対象につき「チェック1回 + 記録1回」を消費する。
+# 上限に当たっても、last_checked_at の古い順に処理するので次の起動で回収される。
+MAX_MONITORS_PER_RUN = "20"
+
+# 同時に投げるチェックの数。
+# 直列だと20対象×最大10秒で Worker の実行時間に収まらず、
+# 無制限だと相手先にも Workers 側にも一度に負荷が集中する。
+CHECK_CONCURRENCY = "5"
+
+# 観測ログの保持日数。これを超えた行は1日1回まとめて削除する。
+CHECK_RETENTION_DAYS = "30"

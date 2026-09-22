@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+*.local
+.DS_Store
+.vite/
+coverage/
+.wrangler/
+supabase/.temp/
+supabase/.branches/
+
+# wrangler のローカル用シークレット（service_role キーを含む）
+.dev.vars

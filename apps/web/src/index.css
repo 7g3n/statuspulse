@@ -1,0 +1,50 @@
+@import 'tailwindcss';
+
+/*
+ * 配色の方針
+ *
+ * 監視ツールは「異常が無いこと」を確かめるために開く画面で、ほとんどの時間は
+ * すべて正常な状態を見ることになる。常時が緑一色だと、本当に赤が出たときに目が慣れて
+ * 気付きにくくなる。そこで正常は控えめな緑にとどめ、面はグレーで構成し、
+ * 彩度の高い色は異常（赤）と要注意（橙）にだけ取っておく。
+ *
+ * 色だけで意味を伝えない。ステータスには必ず文字を添え、チェック履歴の帯は
+ * 色に加えてツールチップで内容を読めるようにする（色覚特性への配慮）。
+ */
+@theme {
+  --color-brand-50: oklch(0.97 0.015 195);
+  --color-brand-100: oklch(0.93 0.035 195);
+  --color-brand-500: oklch(0.6 0.11 195);
+  --color-brand-600: oklch(0.52 0.11 195);
+  --color-brand-700: oklch(0.44 0.1 195);
+
+  /* 稼働状態。up は落ち着いた緑、down は迷いなく赤、unknown は無彩色 */
+  --color-up-100: oklch(0.93 0.05 150);
+  --color-up-500: oklch(0.62 0.13 150);
+  --color-up-700: oklch(0.45 0.11 150);
+  --color-down-100: oklch(0.93 0.045 25);
+  --color-down-500: oklch(0.6 0.19 25);
+  --color-down-700: oklch(0.47 0.17 25);
+  --color-warn-100: oklch(0.94 0.05 75);
+  --color-warn-500: oklch(0.72 0.14 75);
+  --color-warn-700: oklch(0.52 0.12 75);
+}
+
+@layer base {
+  html {
+    /* 日本語の可読性を優先し、游ゴシック系を先に置く */
+    font-family:
+      ui-sans-serif, system-ui, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI',
+      Meiryo, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+  }
+
+  /* 稼働率・応答時間は等幅の数字で揃える。桁が揃わない表は読み違えの元になる */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

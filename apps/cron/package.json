@@ -1,0 +1,22 @@
+{
+  "name": "@statuspulse/cron",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "test": "echo \"no tests in cron (判定ロジックは @statuspulse/core でテストする)\" && exit 0"
+  },
+  "dependencies": {
+    "@statuspulse/core": "workspace:*",
+    "@supabase/supabase-js": "^2.45.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241022.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.84.0"
+  }
+}

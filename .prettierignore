@@ -1,0 +1,4 @@
+pnpm-lock.yaml
+dist/
+.wrangler/
+docs/images/
